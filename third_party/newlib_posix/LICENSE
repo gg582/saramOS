@@ -1,0 +1,4 @@
+This directory vendors POSIX compatibility headers from the FreeBSD src tree
+(stable/14 branch, https://github.com/freebsd/freebsd-src, BSD-3-Clause). Each
+header keeps the original license banner from upstream. See the upstream
+repository for the complete license history.
