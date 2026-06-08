@@ -1,5 +1,7 @@
 # saramOS
 
+![Screenshot](./saramOS.png)
+
 **saramOS** is a POSIX-free bare-metal runtime/RTOS project targeting STM32F769I-DISC1 (Cortex-M7). It now includes a small resilient RTOS kernel core: TCB-owned libttak owner contexts, generation-bound arenas, PendSV context switching, and a HardFault eviction path for failed tasks.
 
 ---

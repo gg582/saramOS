@@ -78,8 +78,12 @@ void saramos_arena_rotate(saramos_arena_t *arena)
 
 size_t saramos_arena_remaining(const saramos_arena_t *arena)
 {
-    if (!arena || !arena->generation_active)
+    if (!arena)
         return 0;
+
+    if(!arena->generation_active) {
+        return arena->env.config.generation_bytes;
+    }
 
     return ttak_arena_generation_remaining(&arena->generation);
 }

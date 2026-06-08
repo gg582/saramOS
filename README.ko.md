@@ -1,5 +1,7 @@
 # saramOS
 
+![Screenshot](./saramOS.png)
+
 **saramOS**는 STM32F769I-DISC1 (Cortex-M7)를 타겟으로 하는 POSIX-free 베어메탈 런타임/RTOS 프로젝트입니다. 현재는 작은 resilient RTOS kernel core를 포함하며, TCB 단위 libttak owner context, generation-bound arena, PendSV context switching, HardFault 기반 task eviction 경로를 제공합니다.
 
 ---
