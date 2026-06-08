@@ -1,6 +1,6 @@
 # saramOS
 
-**saramOS**는 STM32F769I-DISC1 (Cortex-M7)를 타겟으로 하는 POSIX-free 베어메탈 런타임/RTOS 프로젝트입니다.  핵심 엔진으로 [libttak](engine/libttak)을 이식하여 사용하며, libttak의 **generational arena**와 **ownership** 개념을 OS 레벨에서 직접 참조하고 래핑합니다.
+**saramOS**는 STM32F769I-DISC1 (Cortex-M7)를 타겟으로 하는 POSIX-free 베어메탈 런타임/RTOS 프로젝트입니다. 현재는 작은 resilient RTOS kernel core를 포함하며, TCB 단위 libttak owner context, generation-bound arena, PendSV context switching, HardFault 기반 task eviction 경로를 제공합니다.
 
 ---
 
@@ -11,9 +11,10 @@
 3. [프로젝트 구조](#프로젝트-구조)
 4. [빌드 방법](#빌드-방법)
 5. [플래싱 방법](#플래싱-방법)
-6. [libttak 통합: Arena & Ownership](#libttak-통합-arena--ownership)
-7. [디버깅 및 팁](#디버깅-및-팁)
-8. [라이선스](#라이선스)
+6. [Resilient RTOS Kernel Core](#resilient-rtos-kernel-core)
+7. [libttak 통합: Arena & Ownership](#libttak-통합-arena--ownership)
+8. [디버깅 및 팁](#디버깅-및-팁)
+9. [라이선스](#라이선스)
 
 ---
 
@@ -85,6 +86,7 @@ saramOS/
 │   │   └── stm32f769i-disc1.h   # 레지스터 정의 전용 HAL
 │   └── os/
 │       ├── saramos_arena.h   # saramOS arena 래퍼 헤더
+│       ├── saramos_kernel.h  # TCB, scheduler, eviction API
 │       └── saramos_owner.h   # saramOS owner 래퍼 헤더
 ├── src/
 │   ├── hal/stm32f769i-disc1/
@@ -94,6 +96,8 @@ saramOS/
 │   │   └── startup.S         # 벡터 테이블 + Reset_Handler
 │   └── os/
 │       ├── saramos_arena.c   # libttak arena_helper 래퍼
+│       ├── saramos_context.S # PendSV/HardFault Cortex-M7 assembly
+│       ├── saramos_kernel.c  # Ready queue, scheduling, forced reclaim
 │       └── saramos_owner.c   # libttak owner 래퍼
 ├── tools/
 │   └── stm32_flash.sh        # OpenOCD 플래싱 스크립트
@@ -125,10 +129,10 @@ make
 
 ```
    text    data     bss     dec     hex filename
-  25261     292  178352  203905   31c81 build/stm32f769i-disc1/hello_rtos.elf
+  31513     292  174248  206053   324e5 build/stm32f769i-disc1/hello_rtos.elf
 ```
 
-- **text**: 플래시에 기록되는 코드/RO 데이터 (~25 KB)
+- **text**: 플래시에 기록되는 코드/RO 데이터 (~31 KB)
 - **data**: 초기값이 있는 RW 데이터
 - **bss**: 정적 풀 (libttak buddy/pocket/VMA/heap 등 포함, ~178 KB)
 
@@ -248,14 +252,52 @@ screen /dev/ttyACM0 115200
 === saramOS on STM32F769I-DISC1 ===
 Type 'help' for available commands.
 
+saramOS: resilient kernel core init OK
 saramOS: arena init OK
 saramOS: owner init OK
 libttak: async scheduler init OK
+example: calculator programs loaded (arith, modulo)
 ===================================
 saramOS> 
 ```
 
+예제 shell에는 작은 programmable calculator 모드가 포함되어 있습니다:
+
+```text
+program list
+program run arith
+program run modulo
+program mycalc
+prog> set 10
+prog> add 7
+prog> mod 5
+prog> print
+prog> end
+program run mycalc
+```
+
+지원 명령은 `set`, `add`, `sub`, `mul`, `div`, `mod`, `print`입니다. 프로그램은 RAM에 저장되며 재부팅하면 초기화됩니다.
+
 ---
+
+## Resilient RTOS Kernel Core
+
+커널 코어는 `include/os/saramos_kernel.h`, `src/os/saramos_kernel.c`, `src/os/saramos_context.S`에 있습니다.
+
+구현된 항목:
+
+- `saramos_tcb_t`: stack pointer, state, priority, task ID, `saramos_owner_t *owner_ctx`, `saramos_arena_t *bound_arena`, bound epoch snapshot.
+- `saramos_task_init()`: Cortex-M exception stack frame (`R0-R3`, `R12`, `LR`, `PC`, `xPSR`)과 software frame (`R4-R11`)을 초기화.
+- `PendSV_Handler`: `R4-R11` 저장/복구, 현재 TCB의 SP 갱신, 다음 TCB 설치, PSP 기반 exception return 수행.
+- `saramos_schedule()`: CMSIS 없이 `0xE000ED04`의 `ICSR.PENDSVSET`을 직접 설정.
+- `saramos_task_kill_and_reclaim()`: task를 ready queue에서 제거하고 libttak owner context를 destroy한 뒤 bound arena generation을 rotate/reset.
+- `HardFault_Handler`: fault stack을 식별해 `saramos_hardfault_dispatch()`로 넘기고, 현재 TCB를 evict한 뒤 다음 ready task로 전환.
+
+현재 한계:
+
+- 예제 shell은 커널 코어를 초기화하고 링크하지만, task를 명시적으로 만들고 `saramos_kernel_start()`를 호출하기 전까지는 boot application으로 계속 실행됩니다.
+- context switch는 integer callee-saved register(`R4-R11`)만 저장합니다. FPU task context, MPU region programming, SysTick time slicing, per-task stack guard region은 다음 단계입니다.
+- task stack은 kernel-owned memory에 두는 것을 전제로 합니다. task 자신의 arena에서 stack을 할당하면, 같은 stack 위에서 해당 arena를 회수하는 것은 HardFault escape path 밖에서는 안전하지 않습니다.
 
 ## libttak 통합: Arena & Ownership
 

@@ -36,9 +36,36 @@ You should see:
 === saramOS on STM32F769I-DISC1 ===
 Type 'help' for available commands.
 
+saramOS: resilient kernel core init OK
 saramOS: arena init OK
 saramOS: owner init OK
 libttak: async scheduler init OK
+example: calculator programs loaded (arith, modulo)
 ===================================
 saramOS> 
 ```
+
+## Programmable Calculator
+
+The shell includes a tiny Casio-style accumulator program mode.
+
+Built-in examples:
+
+```text
+program run arith
+program run modulo
+```
+
+Create and run a program:
+
+```text
+program mycalc
+prog> set 10
+prog> add 7
+prog> mod 5
+prog> print
+prog> end
+program run mycalc
+```
+
+Supported instructions: `set`, `add`, `sub`, `mul`, `div`, `mod`, `print`.

@@ -1,6 +1,6 @@
 # saramOS
 
-**saramOS** is a POSIX-free bare-metal runtime/RTOS project targeting STM32F769I-DISC1 (Cortex-M7). It ports and integrates [libttak](engine/libttak) as its core engine, directly referencing and wrapping libttak's **generational arena** and **ownership** concepts at the OS level.
+**saramOS** is a POSIX-free bare-metal runtime/RTOS project targeting STM32F769I-DISC1 (Cortex-M7). It now includes a small resilient RTOS kernel core: TCB-owned libttak owner contexts, generation-bound arenas, PendSV context switching, and a HardFault eviction path for failed tasks.
 
 ---
 
@@ -11,9 +11,10 @@
 3. [Project Structure](#project-structure)
 4. [How to Build](#how-to-build)
 5. [How to Flash](#how-to-flash)
-6. [libttak Integration: Arena & Ownership](#libttak-integration-arena--ownership)
-7. [Debugging & Tips](#debugging--tips)
-8. [License](#license)
+6. [Resilient RTOS Kernel Core](#resilient-rtos-kernel-core)
+7. [libttak Integration: Arena & Ownership](#libttak-integration-arena--ownership)
+8. [Debugging & Tips](#debugging--tips)
+9. [License](#license)
 
 ---
 
@@ -86,6 +87,7 @@ saramOS/
 │   │   └── stm32f769i-disc1.h   # Register definition HAL
 │   └── os/
 │       ├── saramos_arena.h   # saramOS arena wrapper header
+│       ├── saramos_kernel.h  # TCB, scheduler, eviction API
 │       └── saramos_owner.h   # saramOS owner wrapper header
 ├── src/
 │   ├── hal/stm32f769i-disc1/
@@ -95,6 +97,8 @@ saramOS/
 │   │   └── startup.S         # Vector table + Reset_Handler
 │   └── os/
 │       ├── saramos_arena.c   # libttak arena_helper wrapper
+│       ├── saramos_context.S # PendSV/HardFault Cortex-M7 assembly
+│       ├── saramos_kernel.c  # Ready queue, scheduling, forced reclaim
 │       └── saramos_owner.c   # libttak owner wrapper
 ├── tools/
 │   └── stm32_flash.sh        # OpenOCD flashing script
@@ -126,10 +130,10 @@ Example output:
 
 ```
    text    data     bss     dec     hex filename
-  25261     292  178352  203905   31c81 build/stm32f769i-disc1/hello_rtos.elf
+  31513     292  174248  206053   324e5 build/stm32f769i-disc1/hello_rtos.elf
 ```
 
-- **text**: Code and RO data written to flash (~25 KB)
+- **text**: Code and RO data written to flash (~31 KB)
 - **data**: Initialized RW data
 - **bss**: Zero-initialized static pool (includes libttak buddy/pocket/VMA/heap, ~178 KB)
 
@@ -249,14 +253,52 @@ Expected output on successful boot:
 === saramOS on STM32F769I-DISC1 ===
 Type 'help' for available commands.
 
+saramOS: resilient kernel core init OK
 saramOS: arena init OK
 saramOS: owner init OK
 libttak: async scheduler init OK
+example: calculator programs loaded (arith, modulo)
 ===================================
 saramOS> 
 ```
 
+The example shell includes a small programmable calculator mode:
+
+```text
+program list
+program run arith
+program run modulo
+program mycalc
+prog> set 10
+prog> add 7
+prog> mod 5
+prog> print
+prog> end
+program run mycalc
+```
+
+Supported program instructions are `set`, `add`, `sub`, `mul`, `div`, `mod`, and `print`. Programs are stored in RAM and are reset on reboot.
+
 ---
+
+## Resilient RTOS Kernel Core
+
+The kernel core lives in `include/os/saramos_kernel.h`, `src/os/saramos_kernel.c`, and `src/os/saramos_context.S`.
+
+Implemented pieces:
+
+- `saramos_tcb_t`: stack pointer, state, priority, task ID, `saramos_owner_t *owner_ctx`, `saramos_arena_t *bound_arena`, and a bound epoch snapshot.
+- `saramos_task_init()`: builds the Cortex-M exception stack frame (`R0-R3`, `R12`, `LR`, `PC`, `xPSR`) plus the software frame (`R4-R11`).
+- `PendSV_Handler`: saves/restores `R4-R11`, updates the current TCB SP, installs the next TCB, and returns through the PSP.
+- `saramos_schedule()`: writes `ICSR.PENDSVSET` directly at `0xE000ED04`; no CMSIS dependency.
+- `saramos_task_kill_and_reclaim()`: removes a task from the ready queue, destroys its libttak owner context, and rotates/resets its bound arena generation.
+- `HardFault_Handler`: captures the faulting stack, routes to `saramos_hardfault_dispatch()`, evicts the current TCB, and switches to the next ready task when one exists.
+
+Current limitations:
+
+- The example shell initializes and links the kernel core, but it still runs as the boot application until tasks are explicitly created and `saramos_kernel_start()` is called.
+- The context switch saves integer callee-saved registers only (`R4-R11`). FPU task context, MPU region programming, SysTick time slicing, and per-task stack guard regions are the next kernel steps.
+- Task stacks should be kernel-owned memory. If a task stack is allocated from the task's own arena, reclaiming that arena while executing on the same stack is unsafe outside the HardFault escape path.
 
 ## libttak Integration: Arena & Ownership
 

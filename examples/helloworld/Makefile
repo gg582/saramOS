@@ -17,7 +17,8 @@ STARTUP := $(HAL_DIR)/startup.S
 LD_SCRIPT := $(HAL_DIR)/linker.ld
 
 OS_DIR := $(ROOT_DIR)/src/os
-OS_SRC := $(OS_DIR)/saramos_arena.c $(OS_DIR)/saramos_owner.c
+OS_SRC := $(OS_DIR)/saramos_arena.c $(OS_DIR)/saramos_owner.c \
+          $(OS_DIR)/saramos_kernel.c $(OS_DIR)/saramos_context.S
 
 LIBTTAK_DIR := $(ROOT_DIR)/engine/libttak
 LIBTTAK_A := $(LIBTTAK_DIR)/lib/libttak.a

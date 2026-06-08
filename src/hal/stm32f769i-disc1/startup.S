@@ -10,7 +10,7 @@ g_pfnVectors:
     .word _estack
     .word Reset_Handler
     .word Default_Handler      /* NMI */
-    .word Default_Handler      /* HardFault */
+    .word HardFault_Handler
     .word Default_Handler      /* MemManage */
     .word Default_Handler      /* BusFault */
     .word Default_Handler      /* UsageFault */
@@ -21,7 +21,7 @@ g_pfnVectors:
     .word Default_Handler      /* SVC */
     .word Default_Handler      /* DebugMon */
     .word 0
-    .word Default_Handler      /* PendSV */
+    .word PendSV_Handler
     .word Default_Handler      /* SysTick */
     .size g_pfnVectors, .-g_pfnVectors
 
