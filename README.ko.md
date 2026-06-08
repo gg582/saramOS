@@ -1,0 +1,396 @@
+# saramOS
+
+**saramOS**는 STM32F769I-DISC1 (Cortex-M7)를 타겟으로 하는 POSIX-free 베어메탈 런타임/RTOS 프로젝트입니다.  핵심 엔진으로 [libttak](engine/libttak)을 이식하여 사용하며, libttak의 **generational arena**와 **ownership** 개념을 OS 레벨에서 직접 참조하고 래핑합니다.
+
+---
+
+## 목차
+
+1. [하드웨어 요구사항](#하드웨어-요구사항)
+2. [소프트웨어 요구사항](#소프트웨어-요구사항)
+3. [프로젝트 구조](#프로젝트-구조)
+4. [빌드 방법](#빌드-방법)
+5. [플래싱 방법](#플래싱-방법)
+6. [libttak 통합: Arena & Ownership](#libttak-통합-arena--ownership)
+7. [디버깅 및 팁](#디버깅-및-팁)
+8. [라이선스](#라이선스)
+
+---
+
+## 하드웨어 요구사항
+
+| 항목 | 사양 |
+|------|------|
+| 보드 | **STM32F769I-DISC1** (STM32F769NIH6) |
+| 코어 | ARM Cortex-M7, 216 MHz (현재 예제는 16 MHz HSI로 부팅) |
+| 플래시 | 2 MB (0x0800_0000) |
+| SRAM | 512 KB (0x2000_0000) |
+| 디버거 | 내장 ST-Link/V2-1 (Micro-USB CN14) |
+| UART | USART1 PA9(TX) / PA10(RX), 115200-8-N-1 (ST-Link 가상 COM 포트) |
+
+---
+
+## 소프트웨어 요구사항
+
+- **GNU Arm Embedded Toolchain** (`arm-none-eabi-gcc`, `arm-none-eabi-ar`, `arm-none-eabi-objcopy`, `arm-none-eabi-size`)
+- **OpenOCD** (플래싱 및 디버깅용)
+- **GNU Make**
+- (선택) `screen`, `minicom`, `picocom` 등으로 UART 로그 확인
+
+### Ubuntu/Debian 설치 예시
+
+```bash
+sudo apt update
+sudo apt install gcc-arm-none-eabi binutils-arm-none-eabi openocd make
+# UART 모니터링
+sudo apt install picocom
+picocom -b 115200 /dev/ttyACM0
+```
+
+### macOS (Homebrew)
+
+```bash
+brew install --cask gcc-arm-embedded
+brew install openocd make
+```
+
+---
+
+## 프로젝트 구조
+
+```
+saramOS/
+├── Makefile                  # 최상위 오케스트레이션 (APP_DIR, CONFIG 지정)
+├── README.md                 # 이 파일
+├── ROADMAP.md                # libttak POSIX-free 리팩토링 로드맵
+├── configs/
+│   └── stm32f769i-disc1      # 보드별 CFLAG/LDFLAG 정의
+├── engine/
+│   └── libttak/              # libttak 서브모듈 (베어메탈 브랜치)
+│       ├── include/          # 공개 헤더 (ttak/mem/arena_helper.h 등)
+│       ├── src/              # 소스 (baremetal_alloc.c, baremetal_pthread.c 등)
+│       ├── Makefile          # libttak 단독 빌드
+│       └── lib/libttak.a     # 빌드 산출물
+├── examples/
+│   └── helloworld/
+│       ├── Makefile          # 실제 빌드 규칙
+│       ├── main.c            # 애플리케이션 진입점
+│       ├── syscalls.c        # Newlib stub (_sbrk, _write → UART)
+│       └── build/stm32f769i-disc1/
+│           ├── hello_rtos.elf
+│           ├── hello_rtos.bin   # 플래시 대상
+│           └── hello_rtos.hex
+├── include/
+│   ├── hal/
+│   │   └── stm32f769i-disc1.h   # 레지스터 정의 전용 HAL
+│   └── os/
+│       ├── saramos_arena.h   # saramOS arena 래퍼 헤더
+│       └── saramos_owner.h   # saramOS owner 래퍼 헤더
+├── src/
+│   ├── hal/stm32f769i-disc1/
+│   │   ├── hal_sys.c         # 캐시/클록/FLASH 지연 초기화
+│   │   ├── hal_uart.c        # USART1 드라이버
+│   │   ├── linker.ld         # 링커 스크립트
+│   │   └── startup.S         # 벡터 테이블 + Reset_Handler
+│   └── os/
+│       ├── saramos_arena.c   # libttak arena_helper 래퍼
+│       └── saramos_owner.c   # libttak owner 래퍼
+├── tools/
+│   └── stm32_flash.sh        # OpenOCD 플래싱 스크립트
+└── third_party/
+    ├── newlib_posix/
+    └── u-boot/
+```
+
+---
+
+## 빌드 방법
+
+### 1) 전체 빌드 (libttak + 애플리케이션)
+
+프로젝트 루트에서:
+
+```bash
+make
+```
+
+이 명령은 다음을 순차적으로 수행합니다:
+
+1. `engine/libttak`을 `EMBEDDED_BAREMETAL=1`로 크로스 컴파일 → `libttak.a` 생성
+2. `examples/helloworld`의 `main.c`, `syscalls.c`, HAL 소스, `src/os/` 래퍼들을 컴파일/링크
+3. `.elf` → `.bin` / `.hex` 변환 (`objcopy`)
+4. `arm-none-eabi-size`로 섹션 크기 출력
+
+출력 예시:
+
+```
+   text    data     bss     dec     hex filename
+  25261     292  178352  203905   31c81 build/stm32f769i-disc1/hello_rtos.elf
+```
+
+- **text**: 플래시에 기록되는 코드/RO 데이터 (~25 KB)
+- **data**: 초기값이 있는 RW 데이터
+- **bss**: 정적 풀 (libttak buddy/pocket/VMA/heap 등 포함, ~178 KB)
+
+### 2) 개별 단계 빌드
+
+```bash
+# libttak만 다시 빌드
+make -C examples/helloworld libttak
+
+# 애플리케이션만 빌드 (libttak이 이미 존재할 때)
+make -C examples/helloworld board
+
+# 맵 파일/섹션 크기 확인
+make size
+
+# 정리
+make clean
+```
+
+### 3) 빌드 실패 시 체크리스트
+
+- `arm-none-eabi-gcc --version`이 출력되는지 확인
+- `engine/libttak`이 초기화된 서브모듈인지 확인 (`git submodule update --init --recursive`)
+- OpenOCD는 플래싱 단계에서만 필요하며, **빌드 자체에는 필요 없음**
+
+---
+
+## 플래싱 방법
+
+### 방법 A: `make flash` (권장)
+
+빌드가 완료된 후:
+
+```bash
+make flash
+```
+
+이 명령은 `tools/stm32_flash.sh`를 호출하여 OpenOCD로 바이너리를 내려씁니다.
+
+내부 동작:
+
+```bash
+openocd -f board/stm32f769i-disco.cfg \
+    -c "init" \
+    -c "reset halt" \
+    -c "flash write_image erase build/stm32f769i-disc1/hello_rtos.bin 0x08000000" \
+    -c "reset run" \
+    -c "shutdown"
+```
+
+> 보드의 **CN14 (USB ST-LINK)** 포트를 PC에 연결해야 합니다.
+
+### 방법 B: 수동 OpenOCD
+
+`make flash`가 동작하지 않거나 다른 바이너리를 내려쓰고 싶을 때:
+
+```bash
+# 1) 미널 하나에서 OpenOCD 서버 실행 (선택, 디버깅용)
+openocd -f board/stm32f769i-disco.cfg
+
+# 2) 또는 한 줄로 플래싱
+cd examples/helloworld
+openocd -f board/stm32f769i-disco.cfg \
+    -c "init; reset halt" \
+    -c "flash write_image erase build/stm32f769i-disc1/hello_rtos.bin 0x08000000" \
+    -c "reset run; shutdown"
+```
+
+### 방법 C: ST-Link 유틸리티 (대안)
+
+`st-link` CLI 도구가 설치되어 있다면:
+
+```bash
+st-flash --reset write build/stm32f769i-disc1/hello_rtos.bin 0x08000000
+```
+
+또는 Windows/Mac에서 **STM32CubeProgrammer** GUI를 사용할 수 있습니다.
+- Interface: ST-Link
+- Address: `0x08000000`
+- File: `examples/helloworld/build/stm32f769i-disc1/hello_rtos.bin`
+
+### 방법 D: GDB + OpenOCD (디버깅 플래싱)
+
+```bash
+# 터미널 1
+openocd -f board/stm32f769i-disco.cfg
+
+# 터미널 2
+arm-none-eabi-gdb build/stm32f769i-disc1/hello_rtos.elf
+(gdb) target extended-remote localhost:3333
+(gdb) load          # 플래시에 로드
+(gdb) monitor reset halt
+(gdb) continue
+```
+
+### 플래싱 후 UART 로그 확인
+
+```bash
+# Linux
+picocom -b 115200 /dev/ttyACM0
+
+# macOS
+picocom -b 115200 /dev/tty.usbmodemXXXX
+
+# 또는 screen
+screen /dev/ttyACM0 115200
+```
+
+정상 부팅 시 출력 예시:
+
+```
+=== saramOS on STM32F769I-DISC1 ===
+libttak: alloc OK (64 bytes)
+libttak: free OK
+saramOS: arena init OK
+saramOS: arena alloc OK (128 bytes)
+saramOS: arena has remaining space
+saramOS: arena reset OK
+saramOS: arena rotate OK
+saramOS: arena destroy OK
+saramOS: owner init OK
+saramOS: owner func registered
+saramOS: owner execute OK
+saramOS: owner destroy OK
+libttak: async scheduler init OK
+libttak: async task scheduled
+  [task] background task running
+libttak: async await OK (result=0x42)
+Hello World
+===================================
+Heartbeat from saramOS
+Heartbeat from saramOS
+...
+```
+
+---
+
+## libttak 통합: Arena & Ownership
+
+saramOS는 libttak의 베어메탈 이식 버전을 엔진으로 사용합니다.  단순히 링크만 하는 것이 아니라, **saramOS 자체의 메모리/리소스 관리 레이어도 libttak의 arena와 owner 개념을 직접 참조**합니다.
+
+### Arena (Generational Memory Management)
+
+libttak의 `ttak_arena_env_t` / `ttak_arena_generation_t`는 **epoch 기반 세대 할당**을 제공합니다:
+
+- 한 세대(generation) 안에서 빠른 bump-pointer 할당
+- 세대 전체를 한 번에 `reset` (in-place 폐기)
+- 세대를 `retire`하면 epoch GC가 나중에 안전하게 회수
+
+**saramOS 래퍼**: `saramos_arena_t` (`include/os/saramos_arena.h`, `src/os/saramos_arena.c`)
+
+```c
+#include <os/saramos_arena.h>
+
+saramos_arena_t arena;
+saramos_arena_init(&arena);
+
+void *buf = saramos_arena_alloc(&arena, 256);   /* 현재 세대에서 256B 할당 */
+size_t rem = saramos_arena_remaining(&arena);   /* 남은 공간 확인 */
+
+saramos_arena_reset(&arena);                    /* 현재 세대 전체 재사용 */
+saramos_arena_rotate(&arena);                   /* 새 세대 시작, 이전 세대는 GC 에게 양도 */
+
+saramos_arena_destroy(&arena);
+```
+
+베어메탈 기본값:
+- 세대 크기: 4 KB
+- 청크 기본값: 256 B
+- `_Thread_local` 제거, 모든 풀은 `.bss` 정적 배열
+
+### Ownership (Resource Isolation)
+
+libttak의 `ttak_owner_t`는 **서브시스템 단위의 리소스 샌드박스**입니다:
+
+- 이름 기반으로 리소스 포인터 등록 (`register_resource`)
+- 이름 기반으로 함수 등록 (`register_func`)
+- `execute` 호출 시 등록된 리소스를 `ctx`로 전달하며 격리 실행
+- `destroy` 시 등록된 모든 리소스와 맵 자동 해제
+
+**saramOS 래퍼**: `saramos_owner_t` (`include/os/saramos_owner.h`, `src/os/saramos_owner.c`)
+
+```c
+#include <os/saramos_owner.h>
+
+saramos_owner_t owner;
+saramos_owner_init(&owner, "uart_driver");
+
+/* 리소스 등록 */
+saramos_owner_register_resource(&owner, "uart_ctx", &uart_instance);
+
+/* 함수 등록 */
+saramos_owner_register_func(&owner, "init", my_uart_init_func);
+
+/* 실행: "init" 함수에 "uart_ctx" 리소스를 ctx로 넘겨 실행 */
+saramos_owner_execute(&owner, "init", "uart_ctx", NULL);
+
+/* 서브시스템 종료 시 일괄 정리 */
+saramos_owner_destroy(&owner);
+```
+
+이 구조를 통해 saramOS의 각 드라이버나 태스크는 **자신의 owner**를 가질 수 있고, 메모리 누수 없이 전체 리소스를 한 번에 정리할 수 있습니다.
+
+### 내부 메모리 풀 현황 (Bare-Metal)
+
+| 풀 | 크기 | 용도 |
+|----|------|------|
+| Buddy pool | 32 KB | 중대형 블록 할당 |
+| Pocket pool | 32 KB | 소형 객체 (≤512 B) |
+| VMA region | 16 KB | 중간 크기 매핑 |
+| Large region | 16 KB | 대형 객체 폴백 |
+| Baremetal heap | 64 KB | `baremetal_alloc.c` first-fit 힙 |
+| 기타 `.bss` | ~14 KB | 기타 정적 변수/스택 |
+| **합계** | **~174 KB** | 512 KB SRAM 내 여유 있음 |
+
+---
+
+## 디버깅 및 팁
+
+### 링커 맵 확인
+
+`examples/helloworld/build/stm32f769i-disc1/hello_rtos.map` 파일을 통해 심볼 주소와 섹션 배치를 확인할 수 있습니다.
+
+### HardFault 발생 시
+
+1. OpenOCD로 접속:
+   ```bash
+   openocd -f board/stm32f769i-disco.cfg
+   ```
+2. GDB로 `info registers`, `backtrace` 확인
+3. `linker.ld`에서 스택/힙 경계 확인
+
+### UART가 출력되지 않을 때
+
+- 보드의 **CN14** (USB ST-LINK) 연결 확인
+- 터미널 에뮬레이터 설정: **115200 baud, 8 data bits, no parity, 1 stop bit, no flow control**
+- `hal_uart_init()`가 `main()` 시작 직후 호출되는지 확인
+
+### 메모리 사용량 최적화
+
+`engine/libttak/internal/ttak/mem_internal.h`에서 아래 상수를 조정할 수 있습니다:
+
+```c
+#define TTAK_EMBEDDED_POOL_ORDER 15   /* 2^15 = 32 KB buddy */
+#define TTAK_POCKET_POOL_SIZE    (4096 * 8)  /* 32 KB */
+#define TTAK_VMA_REGION_SIZE     (16 * 1024) /* 16 KB */
+#define TTAK_LARGE_REGION_SIZE   (16 * 1024) /* 16 KB */
+```
+
+> 값을 줄이면 `.bss`가 감소하지만, 런타임 할당 실패 가능성이 높아집니다.
+
+### libttak 수정 후 반영
+
+libttak 소스를 수정한 후에는 반드시 `make clean` 또는 `make -C examples/helloworld libttak`를 먼저 실행하여 정적 라이브러리를 재빌드해야 합니다.
+
+---
+
+## 라이선스
+
+- **saramOS**: 프로젝트 라이선스는 최상위 `LICENSE` 파일을 참조하세요.
+- **libttak**: `engine/libttak/LICENSE`를 참조하세요.
+
+---
+
+*Happy hacking on bare-metal!*
