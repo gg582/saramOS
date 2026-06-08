@@ -173,8 +173,12 @@ make flash
 ```bash
 openocd -f board/stm32f769i-disco.cfg \
     -c "init" \
-    -c "reset halt" \
+    -c "reset init" \
+    -c "halt" \
+    -c "flash probe 0" \
     -c "flash write_image erase build/stm32f769i-disc1/hello_rtos.bin 0x08000000" \
+    -c "verify_image build/stm32f769i-disc1/hello_rtos.bin 0x08000000" \
+    -c "reset halt" \
     -c "reset run" \
     -c "shutdown"
 ```
@@ -192,9 +196,10 @@ openocd -f board/stm32f769i-disco.cfg
 # 2) 또는 한 줄로 플래싱
 cd examples/helloworld
 openocd -f board/stm32f769i-disco.cfg \
-    -c "init; reset halt" \
+    -c "init; reset init; halt; flash probe 0" \
     -c "flash write_image erase build/stm32f769i-disc1/hello_rtos.bin 0x08000000" \
-    -c "reset run; shutdown"
+    -c "verify_image build/stm32f769i-disc1/hello_rtos.bin 0x08000000" \
+    -c "reset halt; reset run; shutdown"
 ```
 
 ### 방법 C: ST-Link 유틸리티 (대안)
@@ -241,27 +246,13 @@ screen /dev/ttyACM0 115200
 
 ```
 === saramOS on STM32F769I-DISC1 ===
-libttak: alloc OK (64 bytes)
-libttak: free OK
+Type 'help' for available commands.
+
 saramOS: arena init OK
-saramOS: arena alloc OK (128 bytes)
-saramOS: arena has remaining space
-saramOS: arena reset OK
-saramOS: arena rotate OK
-saramOS: arena destroy OK
 saramOS: owner init OK
-saramOS: owner func registered
-saramOS: owner execute OK
-saramOS: owner destroy OK
 libttak: async scheduler init OK
-libttak: async task scheduled
-  [task] background task running
-libttak: async await OK (result=0x42)
-Hello World
 ===================================
-Heartbeat from saramOS
-Heartbeat from saramOS
-...
+saramOS> 
 ```
 
 ---

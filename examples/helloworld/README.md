@@ -34,9 +34,11 @@ You should see:
 
 ```
 === saramOS on STM32F769I-DISC1 ===
-Hello World
+Type 'help' for available commands.
+
+saramOS: arena init OK
+saramOS: owner init OK
+libttak: async scheduler init OK
 ===================================
-Heartbeat from saramOS
-Heartbeat from saramOS
-...
+saramOS> 
 ```
