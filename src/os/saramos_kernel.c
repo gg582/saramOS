@@ -1,4 +1,6 @@
 #include "os/saramos_kernel.h"
+#include <hal/stm32f769i-disc1.h>
+#include <stdio.h>
 
 #define SARAMOS_ICSR_ADDR 0xE000ED04UL
 #define SARAMOS_ICSR_PENDSVSET (1UL << 28)
@@ -339,9 +341,23 @@ void saramos_hardfault_dispatch(uint32_t *fault_stack, uint32_t exc_return)
     saramos_tcb_t *faulted = saramos_current_tcb;
     saramos_tcb_t *next;
     uint32_t primask;
+    char buf[80];
 
-    (void)fault_stack;
     (void)exc_return;
+
+    hal_uart_puts("\r\n*** HardFault ***\r\n");
+    if (fault_stack) {
+        snprintf(buf, sizeof(buf),
+                 "r0=%08lx r1=%08lx r2=%08lx r3=%08lx\r\n",
+                 (unsigned long)fault_stack[0], (unsigned long)fault_stack[1],
+                 (unsigned long)fault_stack[2], (unsigned long)fault_stack[3]);
+        hal_uart_puts(buf);
+        snprintf(buf, sizeof(buf),
+                 "r12=%08lx lr=%08lx pc=%08lx xpsr=%08lx\r\n",
+                 (unsigned long)fault_stack[4], (unsigned long)fault_stack[5],
+                 (unsigned long)fault_stack[6], (unsigned long)fault_stack[7]);
+        hal_uart_puts(buf);
+    }
 
     primask = saramos_irq_save();
 

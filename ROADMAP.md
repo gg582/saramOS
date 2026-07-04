@@ -60,7 +60,7 @@ Transform `engine/libttak` into a fully POSIX-free, bare-metal capable engine fo
 ## Milestone 4: saramOS Integration & Target Flashing
 **Goal:** Produce a flashable binary where the engine initializes, allocates, and loops without HardFault.
 
-- [x] Update `examples/helloworld/Makefile` to cross-compile `libttak` with `arm-none-eabi-gcc`.
+- [x] Update `os/default/Makefile` to cross-compile `libttak` with `arm-none-eabi-gcc`.
 - [x] Ensure CFLAGS include `-mcpu=cortex-m7`, `-mthumb`, `-mfloat-abi=hard`, `-mfpu=fpv5-sp-d16`, `-fno-lto`.
 - [x] Build final ELF/BIN with zero undefined POSIX symbols.
 - [x] Flash onto STM32F769I-DISC1 via OpenOCD.

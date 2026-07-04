@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-BINFILE="${1:-build/stm32f769i-disc1/hello_rtos.bin}"
+BINFILE="${1:-build/stm32f769i-disc1/saramos.bin}"
 OPENOCD_CFG="${OPENOCD_CFG:-board/stm32f769i-disco.cfg}"
 FLASH_ADDR="${FLASH_ADDR:-0x08000000}"
 

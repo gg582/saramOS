@@ -74,15 +74,22 @@ saramOS/
 │       ├── src/              # 소스 (baremetal_alloc.c, baremetal_pthread.c 등)
 │       ├── Makefile          # libttak 단독 빌드
 │       └── lib/libttak.a     # 빌드 산출물
+├── os/
+│   └── default/              # 기본 OS 이미지 (셸, 커널, 네트워크, SD)
+│       ├── main.c            # 공통 셸 및 앱 명령 등록
+│       ├── builtin_programs.c# 내장 계산기 프로그램
+│       ├── syscalls.c        # Newlib stub
+│       └── Makefile
+├── apps/
+│   └── example/
+│       └── game/
+│           └── sudoku/       # 대표 예시 앱 (기본 APP_DIR)
+│               ├── app_sudoku.c
+│               ├── sudoku.c
+│               ├── sudoku.h
+│               └── Makefile
 ├── examples/
-│   └── helloworld/
-│       ├── Makefile          # 실제 빌드 규칙
-│       ├── main.c            # 애플리케이션 진입점
-│       ├── syscalls.c        # Newlib stub (_sbrk, _write → UART)
-│       └── build/stm32f769i-disc1/
-│           ├── hello_rtos.elf
-│           ├── hello_rtos.bin   # 플래시 대상
-│           └── hello_rtos.hex
+│   └── README.md             # 예시는 apps/로 이동함
 ├── include/
 │   ├── hal/
 │   │   └── stm32f769i-disc1.h   # 레지스터 정의 전용 HAL
@@ -112,7 +119,7 @@ saramOS/
 
 ## 빌드 방법
 
-### 1) 전체 빌드 (libttak + 애플리케이션)
+### 1) 전체 빌드 (libttak + 기본 앱)
 
 프로젝트 루트에서:
 
@@ -123,7 +130,7 @@ make
 이 명령은 다음을 순차적으로 수행합니다:
 
 1. `engine/libttak`을 `EMBEDDED_BAREMETAL=1`로 크로스 컴파일 → `libttak.a` 생성
-2. `examples/helloworld`의 `main.c`, `syscalls.c`, HAL 소스, `src/os/` 래퍼들을 컴파일/링크
+2. 기본 앱(`apps/example/game/sudoku`)을 `os/default` 위에 컴파일/링크
 3. `.elf` → `.bin` / `.hex` 변환 (`objcopy`)
 4. `arm-none-eabi-size`로 섹션 크기 출력
 
@@ -131,27 +138,43 @@ make
 
 ```
    text    data     bss     dec     hex filename
-  31513     292  174248  206053   324e5 build/stm32f769i-disc1/hello_rtos.elf
+  31513     292  174248  206053   324e5 build/stm32f769i-disc1/saramos.elf
 ```
 
-- **text**: 플래시에 기록되는 코드/RO 데이터 (~31 KB)
+- **text**: 플래시에 기록되는 코드/RO 데이터
 - **data**: 초기값이 있는 RW 데이터
-- **bss**: 정적 풀 (libttak buddy/pocket/VMA/heap 등 포함, ~178 KB)
+- **bss**: 정적 풀 (libttak buddy/pocket/VMA/heap 등 포함)
 
-### 2) 개별 단계 빌드
+### 2) 다른 앱 빌드 / 기본 OS만 빌드
+
+RIOT 스타일: `APP_DIR`로 앱 디렉토리를 선택합니다.
+
+```bash
+# 앱 없이 기본 OS 이미지만 빌드
+make APP_DIR=os/default
+
+# 원하는 앱 디렉토리 빌드
+make APP_DIR=apps/example/game/sudoku
+
+# 현재 APP_DIR 빌드 정리
+make clean
+
+# 현재 APP_DIR 섹션 크기 확인
+make size
+```
+
+### 3) 개별 단계 빌드
 
 ```bash
 # libttak만 다시 빌드
-make -C examples/helloworld libttak
+make -C os/default libttak
 
-# 애플리케이션만 빌드 (libttak이 이미 존재할 때)
-make -C examples/helloworld board
+# 기본 OS 이미지만 빌드 (libttak이 이미 존재할 때)
+make -C os/default board
 
-# 맵 파일/섹션 크기 확인
-make size
-
-# 정리
-make clean
+# 기본 앱을 직접 빌드
+cd apps/example/game/sudoku
+make
 ```
 
 ### 3) 빌드 실패 시 체크리스트
@@ -182,8 +205,8 @@ openocd -f board/stm32f769i-disco.cfg \
     -c "reset init" \
     -c "halt" \
     -c "flash probe 0" \
-    -c "flash write_image erase build/stm32f769i-disc1/hello_rtos.bin 0x08000000" \
-    -c "verify_image build/stm32f769i-disc1/hello_rtos.bin 0x08000000" \
+    -c "flash write_image erase build/stm32f769i-disc1/saramos.bin 0x08000000" \
+    -c "verify_image build/stm32f769i-disc1/saramos.bin 0x08000000" \
     -c "reset halt" \
     -c "reset run" \
     -c "shutdown"
@@ -200,11 +223,11 @@ openocd -f board/stm32f769i-disco.cfg \
 openocd -f board/stm32f769i-disco.cfg
 
 # 2) 또는 한 줄로 플래싱
-cd examples/helloworld
+cd apps/example/game/sudoku
 openocd -f board/stm32f769i-disco.cfg \
     -c "init; reset init; halt; flash probe 0" \
-    -c "flash write_image erase build/stm32f769i-disc1/hello_rtos.bin 0x08000000" \
-    -c "verify_image build/stm32f769i-disc1/hello_rtos.bin 0x08000000" \
+    -c "flash write_image erase build/stm32f769i-disc1/saramos.bin 0x08000000" \
+    -c "verify_image build/stm32f769i-disc1/saramos.bin 0x08000000" \
     -c "reset halt; reset run; shutdown"
 ```
 
@@ -213,13 +236,13 @@ openocd -f board/stm32f769i-disco.cfg \
 `st-link` CLI 도구가 설치되어 있다면:
 
 ```bash
-st-flash --reset write build/stm32f769i-disc1/hello_rtos.bin 0x08000000
+st-flash --reset write build/stm32f769i-disc1/saramos.bin 0x08000000
 ```
 
 또는 Windows/Mac에서 **STM32CubeProgrammer** GUI를 사용할 수 있습니다.
 - Interface: ST-Link
 - Address: `0x08000000`
-- File: `examples/helloworld/build/stm32f769i-disc1/hello_rtos.bin`
+- File: `apps/example/game/sudoku/build/stm32f769i-disc1/saramos.bin`
 
 ### 방법 D: GDB + OpenOCD (디버깅 플래싱)
 
@@ -228,7 +251,7 @@ st-flash --reset write build/stm32f769i-disc1/hello_rtos.bin 0x08000000
 openocd -f board/stm32f769i-disco.cfg
 
 # 터미널 2
-arm-none-eabi-gdb build/stm32f769i-disc1/hello_rtos.elf
+arm-none-eabi-gdb build/stm32f769i-disc1/saramos.elf
 (gdb) target extended-remote localhost:3333
 (gdb) load          # 플래시에 로드
 (gdb) monitor reset halt
@@ -263,7 +286,16 @@ example: calculator programs loaded (arith, modulo)
 saramOS> 
 ```
 
-예제 shell에는 작은 programmable calculator 모드가 포함되어 있습니다:
+기본 예시 앱은 `sudoku` 명령을 추가합니다:
+
+```text
+sudoku
+```
+
+입력 형식은 `row col value`입니다. 예: `1 2 3`. `0`은 셀을 지우고, `r`은 리셋,
+`h`는 도움말, `q`는 종료입니다.
+
+셸에는 작은 programmable calculator 모드도 포함되어 있습니다:
 
 ```text
 program list
@@ -385,7 +417,7 @@ saramos_owner_destroy(&owner);
 
 ### 링커 맵 확인
 
-`examples/helloworld/build/stm32f769i-disc1/hello_rtos.map` 파일을 통해 심볼 주소와 섹션 배치를 확인할 수 있습니다.
+`apps/example/game/sudoku/build/stm32f769i-disc1/saramos.map` 파일을 통해 심볼 주소와 섹션 배치를 확인할 수 있습니다.
 
 ### HardFault 발생 시
 
@@ -417,7 +449,7 @@ saramos_owner_destroy(&owner);
 
 ### libttak 수정 후 반영
 
-libttak 소스를 수정한 후에는 반드시 `make clean` 또는 `make -C examples/helloworld libttak`를 먼저 실행하여 정적 라이브러리를 재빌드해야 합니다.
+libttak 소스를 수정한 후에는 반드시 `make clean` 또는 `make -C os/default libttak`를 먼저 실행하여 정적 라이브러리를 재빌드해야 합니다.
 
 ---
 

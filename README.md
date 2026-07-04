@@ -75,15 +75,22 @@ saramOS/
 │       ├── src/              # Sources (baremetal_alloc.c, baremetal_pthread.c, etc.)
 │       ├── Makefile          # libttak standalone build
 │       └── lib/libttak.a     # Build output
+├── os/
+│   └── default/              # Default OS image (shell, kernel, network, SD)
+│       ├── main.c            # Common shell and app command registration
+│       ├── builtin_programs.c# Built-in calculator programs
+│       ├── syscalls.c        # Newlib stubs
+│       └── Makefile
+├── apps/
+│   └── example/
+│       └── game/
+│           └── sudoku/       # Representative example app (default APP_DIR)
+│               ├── app_sudoku.c
+│               ├── sudoku.c
+│               ├── sudoku.h
+│               └── Makefile
 ├── examples/
-│   └── helloworld/
-│       ├── Makefile          # Actual build rules
-│       ├── main.c            # Application entry point
-│       ├── syscalls.c        # Newlib stub (_sbrk, _write → UART)
-│       └── build/stm32f769i-disc1/
-│           ├── hello_rtos.elf
-│           ├── hello_rtos.bin   # Target binary for flashing
-│           └── hello_rtos.hex
+│   └── README.md             # Examples moved to apps/
 ├── include/
 │   ├── hal/
 │   │   └── stm32f769i-disc1.h   # Register definition HAL
@@ -113,7 +120,7 @@ saramOS/
 
 ## How to Build
 
-### 1) Full Build (libttak + Application)
+### 1) Full Build (libttak + Default App)
 
 At the project root:
 
@@ -124,7 +131,7 @@ make
 This command performs the following in order:
 
 1. Cross-compiles `engine/libttak` with `EMBEDDED_BAREMETAL=1` → generates `libttak.a`
-2. Compiles and links `examples/helloworld` (`main.c`, `syscalls.c`, HAL source, and `src/os/` wrappers)
+2. Compiles and links the default app (`apps/example/game/sudoku`) on top of `os/default`
 3. Converts `.elf` → `.bin` / `.hex` (`objcopy`)
 4. Prints section sizes using `arm-none-eabi-size`
 
@@ -132,27 +139,43 @@ Example output:
 
 ```
    text    data     bss     dec     hex filename
-  31513     292  174248  206053   324e5 build/stm32f769i-disc1/hello_rtos.elf
+  31513     292  174248  206053   324e5 build/stm32f769i-disc1/saramos.elf
 ```
 
-- **text**: Code and RO data written to flash (~31 KB)
+- **text**: Code and RO data written to flash
 - **data**: Initialized RW data
-- **bss**: Zero-initialized static pool (includes libttak buddy/pocket/VMA/heap, ~178 KB)
+- **bss**: Zero-initialized static pool (includes libttak buddy/pocket/VMA/heap)
 
-### 2) Individual Build Steps
+### 2) Build Other Apps / Base OS Only
+
+RIOT-style: select the app directory with `APP_DIR`.
+
+```bash
+# Build the base OS image without an app
+make APP_DIR=os/default
+
+# Build any app directory that has a Makefile
+make APP_DIR=apps/example/game/sudoku
+
+# Clean up the current APP_DIR build
+make clean
+
+# Check section sizes for the current APP_DIR
+make size
+```
+
+### 3) Individual Build Steps
 
 ```bash
 # Rebuild libttak only
-make -C examples/helloworld libttak
+make -C os/default libttak
 
-# Build application only (when libttak already exists)
-make -C examples/helloworld board
+# Build the base OS image only (when libttak already exists)
+make -C os/default board
 
-# Check map file / section sizes
-make size
-
-# Clean up
-make clean
+# Build the default app directly
+cd apps/example/game/sudoku
+make
 ```
 
 ### 3) Troubleshooting Build Failures
@@ -183,8 +206,8 @@ openocd -f board/stm32f769i-disco.cfg \
     -c "reset init" \
     -c "halt" \
     -c "flash probe 0" \
-    -c "flash write_image erase build/stm32f769i-disc1/hello_rtos.bin 0x08000000" \
-    -c "verify_image build/stm32f769i-disc1/hello_rtos.bin 0x08000000" \
+    -c "flash write_image erase build/stm32f769i-disc1/saramos.bin 0x08000000" \
+    -c "verify_image build/stm32f769i-disc1/saramos.bin 0x08000000" \
     -c "reset halt" \
     -c "reset run" \
     -c "shutdown"
@@ -201,11 +224,11 @@ If `make flash` fails or you want to flash a different binary:
 openocd -f board/stm32f769i-disco.cfg
 
 # 2) Or flash in a single command
-cd examples/helloworld
+cd apps/example/game/sudoku
 openocd -f board/stm32f769i-disco.cfg \
     -c "init; reset init; halt; flash probe 0" \
-    -c "flash write_image erase build/stm32f769i-disc1/hello_rtos.bin 0x08000000" \
-    -c "verify_image build/stm32f769i-disc1/hello_rtos.bin 0x08000000" \
+    -c "flash write_image erase build/stm32f769i-disc1/saramos.bin 0x08000000" \
+    -c "verify_image build/stm32f769i-disc1/saramos.bin 0x08000000" \
     -c "reset halt; reset run; shutdown"
 ```
 
@@ -214,13 +237,13 @@ openocd -f board/stm32f769i-disco.cfg \
 If you have the `st-link` CLI tool installed:
 
 ```bash
-st-flash --reset write build/stm32f769i-disc1/hello_rtos.bin 0x08000000
+st-flash --reset write build/stm32f769i-disc1/saramos.bin 0x08000000
 ```
 
 Alternatively, you can use the **STM32CubeProgrammer** GUI on Windows/Mac:
 - Interface: ST-Link
 - Address: `0x08000000`
-- File: `examples/helloworld/build/stm32f769i-disc1/hello_rtos.bin`
+- File: `apps/example/game/sudoku/build/stm32f769i-disc1/saramos.bin`
 
 ### Method D: GDB + OpenOCD (Debugging & Flashing)
 
@@ -229,7 +252,7 @@ Alternatively, you can use the **STM32CubeProgrammer** GUI on Windows/Mac:
 openocd -f board/stm32f769i-disco.cfg
 
 # Terminal 2
-arm-none-eabi-gdb build/stm32f769i-disc1/hello_rtos.elf
+arm-none-eabi-gdb build/stm32f769i-disc1/saramos.elf
 (gdb) target extended-remote localhost:3333
 (gdb) load          # Load to flash
 (gdb) monitor reset halt
@@ -264,7 +287,16 @@ example: calculator programs loaded (arith, modulo)
 saramOS> 
 ```
 
-The example shell includes a small programmable calculator mode:
+The default example app adds a `sudoku` command:
+
+```text
+sudoku
+```
+
+Enter moves as `row col value`, for example `1 2 3`. Use `0` to clear a cell,
+`r` to reset, `h` for help, and `q` to quit.
+
+The shell also includes a small programmable calculator mode:
 
 ```text
 program list
@@ -386,7 +418,7 @@ Through this structure, each driver or task in saramOS can have **its own owner*
 
 ### Checking the Linker Map
 
-You can inspect symbol addresses and section layouts in `examples/helloworld/build/stm32f769i-disc1/hello_rtos.map`.
+You can inspect symbol addresses and section layouts in `apps/example/game/sudoku/build/stm32f769i-disc1/saramos.map`.
 
 ### In Case of HardFault
 
@@ -418,7 +450,7 @@ You can adjust the following constants in `engine/libttak/internal/ttak/mem_inte
 
 ### Applying libttak Modifications
 
-After modifying libttak source code, run `make clean` or `make -C examples/helloworld libttak` to rebuild the static library before building the main application.
+After modifying libttak source code, run `make clean` or `make -C os/default libttak` to rebuild the static library before building the main application.
 
 ---
 
