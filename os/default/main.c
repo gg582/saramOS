@@ -1421,6 +1421,21 @@ static void cli_sd(const char *arg)
         return;
     }
 
+    /* Automatically mount SD card if not already initialized */
+    if (strncmp(arg, "init", 4) != 0 && strncmp(arg, "inspect", 7) != 0 && strcmp(arg, "info") != 0) {
+        if (disk_status(0) & STA_NOINIT) {
+            if (hal_sdmmc_card_present()) {
+                if (sd_mount() != FR_OK) {
+                    hal_uart_puts("sd: auto-mount failed\r\n");
+                    return;
+                }
+            } else {
+                hal_uart_puts("sd: no card detected\r\n");
+                return;
+            }
+        }
+    }
+
     if (strncmp(arg, "init", 4) == 0 && (arg[4] == '\0' || arg[4] == ' ' || arg[4] == '\t')) {
         cli_sd_init();
         return;

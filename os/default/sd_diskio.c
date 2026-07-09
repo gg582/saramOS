@@ -1,7 +1,7 @@
 #include "sd_diskio.h"
 #include "diskio.h"
 #include <hal/hal_sdmmc.h>
-#include <hal/stm32f769i-disc1.h>
+#include <hal/board.h>
 
 FATFS sd_fatfs;
 static DSTATUS sd_status = STA_NOINIT;

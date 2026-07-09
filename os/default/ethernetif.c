@@ -8,7 +8,7 @@
 #include "lwip/stats.h"
 #include "lwip/snmp.h"
 #include "netif/etharp.h"
-#include <hal/stm32f769i-disc1.h>
+#include <hal/board.h>
 #include <string.h>
 
 #define IFNAME0 's'
