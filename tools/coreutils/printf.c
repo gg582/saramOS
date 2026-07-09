@@ -5,12 +5,25 @@
  * Usage: printf FORMAT [ARG ...]
  */
 
-#include <string.h>
-#include <stdlib.h>
 #include "coreutils.h"
 
 extern void hal_uart_puts(const char *s);
 extern void hal_uart_putc(char c);
+
+/* Local helper: avoids relying on atol/strtol availability in newlib nano. */
+static long str_to_long(const char *s)
+{
+    long result = 0;
+    int neg = 0;
+    if (!s) return 0;
+    if (*s == '-') { neg = 1; s++; }
+    else if (*s == '+') { s++; }
+    while (*s >= '0' && *s <= '9') {
+        result = result * 10 + (*s - '0');
+        s++;
+    }
+    return neg ? -result : result;
+}
 
 int saramos_printf(int argc, char *argv[])
 {
@@ -48,27 +61,27 @@ int saramos_printf(int argc, char *argv[])
                 break;
             case 'd':
             case 'i':
-                snprintf(numbuf, sizeof(numbuf), "%ld", atol(arg));
+                snprintf(numbuf, sizeof(numbuf), "%ld", str_to_long(arg));
                 hal_uart_puts(numbuf);
                 break;
             case 'u':
                 snprintf(numbuf, sizeof(numbuf), "%lu",
-                         (unsigned long)atol(arg));
+                         (unsigned long)str_to_long(arg));
                 hal_uart_puts(numbuf);
                 break;
             case 'o':
                 snprintf(numbuf, sizeof(numbuf), "%lo",
-                         (unsigned long)atol(arg));
+                         (unsigned long)str_to_long(arg));
                 hal_uart_puts(numbuf);
                 break;
             case 'x':
                 snprintf(numbuf, sizeof(numbuf), "%lx",
-                         (unsigned long)atol(arg));
+                         (unsigned long)str_to_long(arg));
                 hal_uart_puts(numbuf);
                 break;
             case 'X':
                 snprintf(numbuf, sizeof(numbuf), "%lX",
-                         (unsigned long)atol(arg));
+                         (unsigned long)str_to_long(arg));
                 hal_uart_puts(numbuf);
                 break;
             case 'c':
