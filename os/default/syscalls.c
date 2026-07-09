@@ -1,7 +1,7 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <stdlib.h>
-#include <hal/stm32f769i-disc1.h>
+#include <hal/board.h>
 
 extern int _end;
 

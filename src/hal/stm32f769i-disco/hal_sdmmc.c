@@ -1,5 +1,5 @@
 /*
- * SDMMC2 HAL driver for STM32F769I-DISC1 on-board microSD socket.
+ * SDMMC2 HAL driver for STM32F769I-DISCO on-board microSD socket.
  *
  * Pin mapping:
  *   PD6  -> SDMMC2_CK  (AF11)

@@ -1,14 +1,15 @@
-# Root Makefile for saramOS (STM32F769I-DISC1 only)
+# Root Makefile for saramOS
 #
 # Usage:
 #   make                         # build the default example app (sudoku)
+#   make BOARD=stm32f769i-disc1  # build for the DISC1 variant
 #   make APP_DIR=os/default      # build the base OS image only
 #   make APP_DIR=<app-dir>       # build any app directory that has a Makefile
 #   make flash                   # flash the current APP_DIR image
 #   make clean                   # clean the current APP_DIR build
 
-CONFIG ?= stm32f769i-disc1
-BOARDS_CONFIG := configs/$(CONFIG)
+BOARD ?= stm32f769i-disco
+BOARDS_CONFIG := configs/$(BOARD)
 
 ifeq ($(wildcard $(BOARDS_CONFIG)),)
 $(error Configuration file $(BOARDS_CONFIG) not found)
@@ -23,15 +24,15 @@ all: app
 
 app:
 	@if [ ! -d "$(APP_DIR)" ]; then echo "Error: APP_DIR=$(APP_DIR) not found"; exit 1; fi
-	$(MAKE) -C $(APP_DIR) CONFIG=$(CONFIG) board
+	$(MAKE) -C $(APP_DIR) BOARD=$(BOARD) TOOLS=$(TOOLS) board
 
 flash:
 	@if [ ! -d "$(APP_DIR)" ]; then echo "Error: APP_DIR=$(APP_DIR) not found"; exit 1; fi
-	$(MAKE) -C $(APP_DIR) CONFIG=$(CONFIG) flash
+	$(MAKE) -C $(APP_DIR) BOARD=$(BOARD) TOOLS=$(TOOLS) flash
 
 size:
 	@if [ ! -d "$(APP_DIR)" ]; then echo "Error: APP_DIR=$(APP_DIR) not found"; exit 1; fi
-	$(MAKE) -C $(APP_DIR) CONFIG=$(CONFIG) size
+	$(MAKE) -C $(APP_DIR) BOARD=$(BOARD) TOOLS=$(TOOLS) size
 
 clean:
-	-$(MAKE) -C $(APP_DIR) CONFIG=$(CONFIG) clean
+	-$(MAKE) -C $(APP_DIR) BOARD=$(BOARD) TOOLS=$(TOOLS) clean

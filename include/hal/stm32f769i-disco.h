@@ -1,5 +1,5 @@
-#ifndef HAL_STM32F769I_DISC1_H
-#define HAL_STM32F769I_DISC1_H
+#ifndef HAL_STM32F769I_DISCO_H
+#define HAL_STM32F769I_DISCO_H
 
 #include <stdint.h>
 #include <stddef.h>
@@ -129,7 +129,7 @@ typedef struct {
 
 #define SDMMC1          ((SDMMC1_TypeDef *)SDMMC1_BASE)
 
-/* --- SDMMC2 (on-board microSD on STM32F769I-DISC1) --- */
+/* --- SDMMC2 (on-board microSD on STM32F769I-DISCO) --- */
 #define SDMMC2_BASE     0x40011C00U
 
 typedef struct {
@@ -238,4 +238,4 @@ void scb_clean_dcache(const void *addr, uint32_t len);
 }
 #endif
 
-#endif /* HAL_STM32F769I_DISC1_H */
+#endif /* HAL_STM32F769I_DISCO_H */

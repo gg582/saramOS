@@ -1,5 +1,5 @@
 #include "sudoku.h"
-#include <hal/stm32f769i-disc1.h>
+#include <hal/board.h>
 
 static int sudoku_getc_cli(void)
 {

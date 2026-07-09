@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <hal/stm32f769i-disc1.h>
+#include <hal/board.h>
 #include <hal/hal_gpio.h>
 #include <hal/hal_sdmmc.h>
 #include <hal/hal_eth.h>
@@ -12,6 +12,8 @@
 #include <os/saramos_arena.h>
 #include <os/saramos_kernel.h>
 #include <os/saramos_owner.h>
+#include <os/saramos_scheduler.h>
+#include <os/saramos_process.h>
 #include "lwip/init.h"
 #include "lwip/netif.h"
 #include "lwip/dhcp.h"
@@ -23,6 +25,17 @@
 #include "sd_diskio.h"
 #include "diskio.h"
 #include "ff.h"
+
+#ifdef ENABLE_TOOL_FSUTILS
+#include "fsutils.h"
+#include "shell.h"
+#endif
+#ifdef ENABLE_TOOL_COREUTILS
+#include "coreutils.h"
+#endif
+#ifdef ENABLE_TOOL_VI
+#include "saramos_port.h"
+#endif
 
 /* lwIP sys_now() for bare-metal NO_SYS=1 mode */
 u32_t sys_now(void)
@@ -66,10 +79,33 @@ static void cli_help(void)
         "  clear      - Clear screen\r\n"
         "  net init   - Initialize Ethernet and start DHCP\r\n"
         "  net status - Show network link/IP status\r\n"
+        "  net show mac  - Show Ethernet MAC address\r\n"
+        "  net show ipv4 - Show IPv4 address/netmask/gateway\r\n"
+        "  net show ipv6 - Show IPv6 addresses\r\n"
         "  http start - Start HTTP server\r\n"
         "  sd init    - Initialize and mount SD card\r\n"
         "  sd ls <p>  - List SD card directory\r\n"
         "  sd cat <f> - Print SD card file contents\r\n"
+#ifdef ENABLE_TOOL_FSUTILS
+        "  sd rm <f>  - Remove SD card file\r\n"
+        "  sd mkdir <d> - Create SD card directory\r\n"
+        "  sd echo [text]... - Print text to console\r\n"
+        "  sd tee <f> <text>... - Write text to file\r\n"
+        "  sd touch <f>... - Create files or update timestamps\r\n"
+        "  sd cp <src> <dst> - Copy a file\r\n"
+        "  sd mv <src> <dst> - Rename or move a file\r\n"
+        "  sd chmod <mode> <f>... - Change FAT attributes\r\n"
+        "  sd mountfs - Enter minimal Unix-like shell\r\n"
+#ifdef ENABLE_TOOL_VI
+        "  sd vi <f>  - Edit file with minimal vi\r\n"
+#endif
+#endif
+#ifdef ENABLE_TOOL_EXTRASHELL
+        "  (shell env) - cd, pwd, ls, cp, mv, rm, mkdir\r\n"
+        "  (shell env) - cat, tee, head, tail, wc, grep, sort\r\n"
+        "  (shell env) - find, touch, echo, env, export, source\r\n"
+        "  (shell env) - if/for/test, glob/variable expansion\r\n"
+#endif
         "  sd info    - Show SD card info\r\n"
         "  sd inspect - Show SD pin/register state\r\n"
         "  pin ...    - GPIO pin control\r\n"
@@ -641,6 +677,82 @@ static void cli_net_status(void)
     }
 }
 
+static void cli_net_show_mac(void)
+{
+    char buf[64];
+    unsigned int len;
+
+    if (!net_initialized) {
+        hal_uart_puts("net: not initialized (use 'net init')\r\n");
+        return;
+    }
+
+    len = (gnetif.hwaddr_len > 0) ? (unsigned int)gnetif.hwaddr_len : 6U;
+    if (len > sizeof(gnetif.hwaddr))
+        len = sizeof(gnetif.hwaddr);
+
+    snprintf(buf, sizeof(buf), "net: MAC %02X", (unsigned)gnetif.hwaddr[0]);
+    hal_uart_puts(buf);
+    for (unsigned int i = 1; i < len; i++) {
+        snprintf(buf, sizeof(buf), ":%02X", (unsigned)gnetif.hwaddr[i]);
+        hal_uart_puts(buf);
+    }
+    hal_uart_puts("\r\n");
+}
+
+static void cli_net_show_ipv4(void)
+{
+    char buf[80];
+
+    if (!net_initialized) {
+        hal_uart_puts("net: not initialized (use 'net init')\r\n");
+        return;
+    }
+
+    if (!dhcp_supplied_address(&gnetif)) {
+        hal_uart_puts("net: IPv4 not configured (DHCP still negotiating...)\r\n");
+        return;
+    }
+
+    snprintf(buf, sizeof(buf), "net: IPv4 address %s\r\n",
+             ip4addr_ntoa(netif_ip4_addr(&gnetif)));
+    hal_uart_puts(buf);
+    snprintf(buf, sizeof(buf), "net: IPv4 netmask %s\r\n",
+             ip4addr_ntoa(netif_ip4_netmask(&gnetif)));
+    hal_uart_puts(buf);
+    snprintf(buf, sizeof(buf), "net: IPv4 gateway %s\r\n",
+             ip4addr_ntoa(netif_ip4_gw(&gnetif)));
+    hal_uart_puts(buf);
+}
+
+static void cli_net_show_ipv6(void)
+{
+#if LWIP_IPV6
+    char buf[80];
+
+    if (!net_initialized) {
+        hal_uart_puts("net: not initialized (use 'net init')\r\n");
+        return;
+    }
+
+    int any = 0;
+    for (int i = 0; i < LWIP_IPV6_NUM_ADDRESSES; i++) {
+        if (ip6_addr_isvalid(netif_ip6_addr_state(&gnetif, i))) {
+            snprintf(buf, sizeof(buf), "net: IPv6 address %s\r\n",
+                     ip6addr_ntoa(netif_ip6_addr(&gnetif, i)));
+            hal_uart_puts(buf);
+            any = 1;
+        }
+    }
+
+    if (!any) {
+        hal_uart_puts("net: IPv6 not configured\r\n");
+    }
+#else
+    hal_uart_puts("net: IPv6 not enabled in lwIP config\r\n");
+#endif
+}
+
 static void cli_http_start(void)
 {
 #if LWIP_HTTPD
@@ -675,9 +787,9 @@ static void cli_sd_info(void)
     char buf[64];
     int present = hal_sdmmc_card_present();
 
-    snprintf(buf, sizeof(buf), "sd: card %s (PG2=%s)\r\n",
+    snprintf(buf, sizeof(buf), "sd: card %s (PI15=%s)\r\n",
              present ? "detected" : "not detected",
-             hal_gpio_read(GPIOG_BASE, 2) ? "high" : "low");
+             hal_gpio_read(GPIOI_BASE, 15) ? "high" : "low");
     hal_uart_puts(buf);
 
     if (!present)
@@ -694,8 +806,8 @@ static void cli_sd_inspect(void)
 
     hal_uart_puts("SD inspect:\r\n");
 
-    snprintf(buf, sizeof(buf), "  PG2/CD pin:      %s\r\n",
-             hal_gpio_read(GPIOG_BASE, 2) ? "high" : "low");
+    snprintf(buf, sizeof(buf), "  PI15/CD pin:     %s\r\n",
+             hal_gpio_read(GPIOI_BASE, 15) ? "high" : "low");
     hal_uart_puts(buf);
 
     snprintf(buf, sizeof(buf), "  card_present():  %d\r\n", hal_sdmmc_card_present());
@@ -705,11 +817,11 @@ static void cli_sd_inspect(void)
              (disk_status(0) & STA_NOINIT) ? 1 : 0);
     hal_uart_puts(buf);
 
-    snprintf(buf, sizeof(buf), "  SDMMC POWER:     0x%08lX\r\n", (unsigned long)SDMMC1->POWER);
+    snprintf(buf, sizeof(buf), "  SDMMC2 POWER:    0x%08lX\r\n", (unsigned long)SDMMC2->POWER);
     hal_uart_puts(buf);
-    snprintf(buf, sizeof(buf), "  SDMMC CLKCR:     0x%08lX\r\n", (unsigned long)SDMMC1->CLKCR);
+    snprintf(buf, sizeof(buf), "  SDMMC2 CLKCR:    0x%08lX\r\n", (unsigned long)SDMMC2->CLKCR);
     hal_uart_puts(buf);
-    snprintf(buf, sizeof(buf), "  SDMMC STA:       0x%08lX\r\n", (unsigned long)SDMMC1->STA);
+    snprintf(buf, sizeof(buf), "  SDMMC2 STA:      0x%08lX\r\n", (unsigned long)SDMMC2->STA);
     hal_uart_puts(buf);
     snprintf(buf, sizeof(buf), "  RCC AHB2RSTR:    0x%08lX\r\n", (unsigned long)RCC_AHB2RSTR);
     hal_uart_puts(buf);
@@ -719,19 +831,24 @@ static void cli_sd_inspect(void)
     hal_uart_puts(buf);
     snprintf(buf, sizeof(buf), "  RCC DCKCFGR2:    0x%08lX\r\n", (unsigned long)RCC_DCKCFGR2);
     hal_uart_puts(buf);
-    snprintf(buf, sizeof(buf), "  GPIOC MODER:     0x%08lX AFRH: 0x%08lX PUPDR: 0x%08lX\r\n",
-             (unsigned long)*(volatile uint32_t *)(GPIOC_BASE + 0x00U),
-             (unsigned long)*(volatile uint32_t *)(GPIOC_BASE + 0x24U),
-             (unsigned long)*(volatile uint32_t *)(GPIOC_BASE + 0x0CU));
+    snprintf(buf, sizeof(buf), "  GPIOB MODER:     0x%08lX AFRL: 0x%08lX PUPDR: 0x%08lX\r\n",
+             (unsigned long)*(volatile uint32_t *)(GPIOB_BASE + 0x00U),
+             (unsigned long)*(volatile uint32_t *)(GPIOB_BASE + 0x20U),
+             (unsigned long)*(volatile uint32_t *)(GPIOB_BASE + 0x0CU));
     hal_uart_puts(buf);
     snprintf(buf, sizeof(buf), "  GPIOD MODER:     0x%08lX AFRL: 0x%08lX\r\n",
              (unsigned long)*(volatile uint32_t *)(GPIOD_BASE + 0x00U),
              (unsigned long)*(volatile uint32_t *)(GPIOD_BASE + 0x20U));
     hal_uart_puts(buf);
-    snprintf(buf, sizeof(buf), "  GPIOG MODER:     0x%08lX AFRL: 0x%08lX PUPDR: 0x%08lX\r\n",
+    snprintf(buf, sizeof(buf), "  GPIOG MODER:     0x%08lX AFRH: 0x%08lX PUPDR: 0x%08lX\r\n",
              (unsigned long)*(volatile uint32_t *)(GPIOG_BASE + 0x00U),
-             (unsigned long)*(volatile uint32_t *)(GPIOG_BASE + 0x20U),
+             (unsigned long)*(volatile uint32_t *)(GPIOG_BASE + 0x24U),
              (unsigned long)*(volatile uint32_t *)(GPIOG_BASE + 0x0CU));
+    hal_uart_puts(buf);
+    snprintf(buf, sizeof(buf), "  GPIOI MODER:     0x%08lX AFRH: 0x%08lX PUPDR: 0x%08lX\r\n",
+             (unsigned long)*(volatile uint32_t *)(GPIOI_BASE + 0x00U),
+             (unsigned long)*(volatile uint32_t *)(GPIOI_BASE + 0x24U),
+             (unsigned long)*(volatile uint32_t *)(GPIOI_BASE + 0x0CU));
     hal_uart_puts(buf);
 
     snprintf(buf, sizeof(buf), "  capacity blocks: %lu\r\n",
@@ -798,6 +915,155 @@ static void cli_sd_cat(const char *path)
 
     f_close(&fil);
 }
+
+#ifdef ENABLE_TOOL_FSUTILS
+static int cli_sd_argc(const char *arg, const char *cmdname, char *argv[], int max_argc, char *buf, size_t buf_size)
+{
+    if (!arg)
+        return 0;
+    strncpy(buf, arg, buf_size - 1);
+    buf[buf_size - 1] = '\0';
+
+    int argc = 0;
+    if (cmdname)
+        argv[argc++] = (char *)cmdname;
+
+    char *p = buf;
+    while (*p && argc < max_argc) {
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (!*p)
+            break;
+        argv[argc++] = p;
+        while (*p && *p != ' ' && *p != '\t')
+            p++;
+        if (*p) {
+            *p = '\0';
+            p++;
+        }
+    }
+    return argc;
+}
+
+static void cli_sd_rm(const char *arg)
+{
+    char buf[128];
+    char *argv[8];
+    int argc = cli_sd_argc(arg, "rm", argv, 8, buf, sizeof(buf));
+    if (argc < 2) {
+        hal_uart_puts("Usage: sd rm <file>\r\n");
+        return;
+    }
+    saramos_rm(argc, argv);
+}
+
+static void cli_sd_mkdir(const char *arg)
+{
+    char buf[128];
+    char *argv[8];
+    int argc = cli_sd_argc(arg, "mkdir", argv, 8, buf, sizeof(buf));
+    if (argc < 2) {
+        hal_uart_puts("Usage: sd mkdir <dir>\r\n");
+        return;
+    }
+    saramos_mkdir(argc, argv);
+}
+
+static void cli_sd_echo(const char *arg)
+{
+    char buf[128];
+    char *argv[16];
+    int argc = cli_sd_argc(arg, "echo", argv, 16, buf, sizeof(buf));
+    saramos_echo(argc, argv);
+}
+
+static void cli_sd_tee(const char *arg)
+{
+    char buf[256];
+    char *argv[16];
+    int argc = cli_sd_argc(arg, "tee", argv, 16, buf, sizeof(buf));
+    if (argc < 3) {
+        hal_uart_puts("Usage: sd tee <file> <text>...\r\n");
+        return;
+    }
+    saramos_tee(argc, argv);
+}
+
+#ifdef ENABLE_TOOL_COREUTILS
+static void cli_sd_touch(const char *arg)
+{
+    char buf[256];
+    char *argv[16];
+    int argc = cli_sd_argc(arg, "touch", argv, 16, buf, sizeof(buf));
+    if (argc < 2) {
+        hal_uart_puts("Usage: sd touch <file>...\r\n");
+        return;
+    }
+    saramos_touch(argc, argv);
+}
+
+static void cli_sd_cp(const char *arg)
+{
+    char buf[256];
+    char *argv[8];
+    int argc = cli_sd_argc(arg, "cp", argv, 8, buf, sizeof(buf));
+    if (argc < 3) {
+        hal_uart_puts("Usage: sd cp <src> <dst>\r\n");
+        return;
+    }
+    saramos_cp(argc, argv);
+}
+
+static void cli_sd_mv(const char *arg)
+{
+    char buf[256];
+    char *argv[8];
+    int argc = cli_sd_argc(arg, "mv", argv, 8, buf, sizeof(buf));
+    if (argc < 3) {
+        hal_uart_puts("Usage: sd mv <src> <dst>\r\n");
+        return;
+    }
+    saramos_mv(argc, argv);
+}
+
+static void cli_sd_chmod(const char *arg)
+{
+    char buf[256];
+    char *argv[16];
+    int argc = cli_sd_argc(arg, "chmod", argv, 16, buf, sizeof(buf));
+    if (argc < 3) {
+        hal_uart_puts("Usage: sd chmod <mode> <file>...\r\n");
+        return;
+    }
+    saramos_chmod(argc, argv);
+}
+#endif
+
+static void cli_sd_mountfs(void)
+{
+#ifdef ENABLE_TOOL_EXTRASHELL
+    saramos_proc_spawn_child(saramos_current_proc, "shell",
+                             shell_interactive_process,
+                             0, NULL, NULL, NULL, 0);
+#else
+    shell_run();
+#endif
+}
+#endif
+
+#ifdef ENABLE_TOOL_VI
+static void cli_sd_vi(const char *arg)
+{
+    char buf[128];
+    char *argv[4];
+    int argc = cli_sd_argc(arg, "vi", argv, 4, buf, sizeof(buf));
+    if (argc < 2) {
+        hal_uart_puts("Usage: sd vi <file>\r\n");
+        return;
+    }
+    saramos_vi(argc, argv);
+}
+#endif
 
 /* --- GPIO pin debug state --- */
 static uint32_t last_input_port = 0;
@@ -1184,13 +1450,99 @@ static void cli_sd(const char *arg)
         return;
     }
 
-    hal_uart_puts("Usage: sd init/info/inspect/ls/cat\r\n");
+#ifdef ENABLE_TOOL_FSUTILS
+    if (strncmp(arg, "rm", 2) == 0 && (arg[2] == '\0' || arg[2] == ' ' || arg[2] == '\t')) {
+        sub = arg + 2;
+        skip_spaces(&sub);
+        cli_sd_rm(sub);
+        return;
+    }
+
+    if (strncmp(arg, "mkdir", 5) == 0 && (arg[5] == '\0' || arg[5] == ' ' || arg[5] == '\t')) {
+        sub = arg + 5;
+        skip_spaces(&sub);
+        cli_sd_mkdir(sub);
+        return;
+    }
+
+    if (strncmp(arg, "echo", 4) == 0 && (arg[4] == '\0' || arg[4] == ' ' || arg[4] == '\t')) {
+        sub = arg + 4;
+        skip_spaces(&sub);
+        cli_sd_echo(sub);
+        return;
+    }
+
+    if (strncmp(arg, "tee", 3) == 0 && (arg[3] == '\0' || arg[3] == ' ' || arg[3] == '\t')) {
+        sub = arg + 3;
+        skip_spaces(&sub);
+        cli_sd_tee(sub);
+        return;
+    }
+
+#ifdef ENABLE_TOOL_COREUTILS
+    if (strncmp(arg, "touch", 5) == 0 && (arg[5] == '\0' || arg[5] == ' ' || arg[5] == '\t')) {
+        sub = arg + 5;
+        skip_spaces(&sub);
+        cli_sd_touch(sub);
+        return;
+    }
+
+    if (strncmp(arg, "cp", 2) == 0 && (arg[2] == '\0' || arg[2] == ' ' || arg[2] == '\t')) {
+        sub = arg + 2;
+        skip_spaces(&sub);
+        cli_sd_cp(sub);
+        return;
+    }
+
+    if (strncmp(arg, "mv", 2) == 0 && (arg[2] == '\0' || arg[2] == ' ' || arg[2] == '\t')) {
+        sub = arg + 2;
+        skip_spaces(&sub);
+        cli_sd_mv(sub);
+        return;
+    }
+
+    if (strncmp(arg, "chmod", 5) == 0 && (arg[5] == '\0' || arg[5] == ' ' || arg[5] == '\t')) {
+        sub = arg + 5;
+        skip_spaces(&sub);
+        cli_sd_chmod(sub);
+        return;
+    }
+#endif
+
+    if (strcmp(arg, "mountfs") == 0) {
+        cli_sd_mountfs();
+        return;
+    }
+#ifdef ENABLE_TOOL_VI
+    if (strncmp(arg, "vi", 2) == 0 && (arg[2] == '\0' || arg[2] == ' ' || arg[2] == '\t')) {
+        sub = arg + 2;
+        skip_spaces(&sub);
+        cli_sd_vi(sub);
+        return;
+    }
+#endif
+#endif
+
+    hal_uart_puts("Usage: sd init/info/inspect/ls/cat");
+#ifdef ENABLE_TOOL_FSUTILS
+    hal_uart_puts("/rm/mkdir/echo/tee");
+#ifdef ENABLE_TOOL_COREUTILS
+    hal_uart_puts("/touch/cp/mv/chmod");
+#endif
+    hal_uart_puts("/mountfs");
+#ifdef ENABLE_TOOL_VI
+    hal_uart_puts("/vi");
+#endif
+#endif
+    hal_uart_puts("\r\n");
 }
 
 static void cli_net(const char *arg)
 {
+    const char *sub;
+
     if (!arg || *arg == '\0') {
-        hal_uart_puts("Usage: net init/status, http start\r\n");
+        hal_uart_puts("Usage: net init/status/show, http start\r\n");
         return;
     }
 
@@ -1204,7 +1556,30 @@ static void cli_net(const char *arg)
         return;
     }
 
-    hal_uart_puts("Usage: net init/status, http start\r\n");
+    if (strncmp(arg, "show", 4) == 0 && (arg[4] == '\0' || arg[4] == ' ' || arg[4] == '\t')) {
+        sub = arg + 4;
+        skip_spaces(&sub);
+
+        if (strcmp(sub, "mac") == 0) {
+            cli_net_show_mac();
+            return;
+        }
+
+        if (strcmp(sub, "ipv4") == 0) {
+            cli_net_show_ipv4();
+            return;
+        }
+
+        if (strcmp(sub, "ipv6") == 0) {
+            cli_net_show_ipv6();
+            return;
+        }
+
+        hal_uart_puts("Usage: net show mac/ipv4/ipv6\r\n");
+        return;
+    }
+
+    hal_uart_puts("Usage: net init/status/show, http start\r\n");
 }
 
 static void cli_unknown(const char *cmd)
@@ -1297,6 +1672,7 @@ static void cli_execute(char *line)
     }
 }
 
+/* Synchronous line reader for non-process contexts (program editor/runner). */
 static void cli_read_line(char *buf, size_t size)
 {
     size_t i = 0;
@@ -1304,15 +1680,8 @@ static void cli_read_line(char *buf, size_t size)
 
     while (1) {
         c = hal_uart_try_getc();
-        if (c < 0) {
-            /* No UART input: keep the network stack alive while waiting. */
-            if (net_initialized) {
-                ethernetif_input(&gnetif);
-                sys_check_timeouts();
-                hal_eth_poll();
-            }
+        if (c < 0)
             continue;
-        }
 
         if (c == '\r' || c == '\n') {
             hal_uart_puts("\r\n");
@@ -1330,6 +1699,52 @@ static void cli_read_line(char *buf, size_t size)
             }
         }
     }
+}
+
+/* Scheduler housekeeping hook: drive lwIP and libttak background tasks. */
+void saramos_sched_housekeeping(void)
+{
+    if (net_initialized) {
+        ethernetif_input(&gnetif);
+        sys_check_timeouts();
+        hal_eth_poll();
+    }
+    ttak_cooperative_run_once(ttak_get_tick_count());
+}
+
+static int cli_input_process(saramos_process_t *p)
+{
+    static char cmd_buf[CMD_BUF_SIZE];
+    static size_t i = 0;
+    int c;
+
+    PROC_BEGIN(p);
+    while (1) {
+        i = 0;
+        cli_prompt();
+        while (1) {
+            PROC_GETC(p, c);
+            if (c == '\r' || c == '\n') {
+                proc_puts("\r\n");
+                cmd_buf[i] = '\0';
+                cli_execute(cmd_buf);
+                PROC_WAIT(p, !saramos_proc_has_children(p));
+                saramos_proc_wait_children(p);
+                break;
+            } else if (c == '\b' || c == 127) {
+                if (i > 0) {
+                    i--;
+                    proc_puts("\b \b");
+                }
+            } else if (c >= 32 && c < 127) {
+                if (i + 1 < sizeof(cmd_buf)) {
+                    cmd_buf[i++] = (char)c;
+                    proc_putc((char)c);
+                }
+            }
+        }
+    }
+    PROC_END(p);
 }
 
 int main(void)
@@ -1359,8 +1774,13 @@ int main(void)
         hal_uart_puts("saramOS: owner init FAILED\r\n");
     }
 
+    /* --- 1 ms tick source --- */
+    hal_systick_init();
+    hal_uart_puts("saramOS: systick 1ms OK\r\n");
+
     /* --- cooperative scheduler init --- */
     ttak_async_init(0);
+    saramos_sched_init();
     hal_uart_puts("libttak: async scheduler init OK\r\n");
 #ifdef ENABLE_BUILTIN_EXAMPLES
     program_init_builtins();
@@ -1369,23 +1789,8 @@ int main(void)
     app_register_commands();
     hal_uart_puts("===================================\r\n");
 
-    char cmd_buf[CMD_BUF_SIZE];
-
-    while (1) {
-        cli_prompt();
-        cli_read_line(cmd_buf, sizeof(cmd_buf));
-        cli_execute(cmd_buf);
-
-        /* Drive lwIP stack */
-        if (net_initialized) {
-            ethernetif_input(&gnetif);
-            sys_check_timeouts();
-            hal_eth_poll();
-        }
-
-        /* Drive background tasks */
-        ttak_cooperative_run_once(ttak_get_tick_count());
-    }
+    saramos_proc_spawn("cli", cli_input_process, 0, NULL, NULL, NULL, 0);
+    saramos_sched_run();
 
     return 0;
 }

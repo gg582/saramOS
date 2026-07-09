@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-BINFILE="${1:-build/stm32f769i-disc1/saramos.bin}"
+BINFILE="${1:-build/stm32f769i-disco/saramos.bin}"
 OPENOCD_CFG="${OPENOCD_CFG:-board/stm32f769i-disco.cfg}"
 FLASH_ADDR="${FLASH_ADDR:-0x08000000}"
 
@@ -11,7 +11,7 @@ if [ ! -f "$BINFILE" ]; then
     exit 1
 fi
 
-echo "[flash] Programming STM32F769I-DISC1 via ST-Link/OpenOCD..."
+echo "[flash] Programming STM32F769I-DISCO via ST-Link/OpenOCD..."
 echo "[flash] Binary: $BINFILE"
 echo "[flash] Address: $FLASH_ADDR"
 

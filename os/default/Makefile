@@ -1,6 +1,6 @@
 ROOT_DIR := $(realpath ../..)
-CONFIG ?= stm32f769i-disc1
-BOARDS_CONFIG := $(ROOT_DIR)/configs/$(CONFIG)
+BOARD ?= stm32f769i-disco
+BOARDS_CONFIG := $(ROOT_DIR)/configs/$(BOARD)
 
 ifeq ($(wildcard $(BOARDS_CONFIG)),)
 $(error Configuration file $(BOARDS_CONFIG) not found)
@@ -19,7 +19,9 @@ LD_SCRIPT := $(HAL_DIR)/linker.ld
 
 OS_DIR := $(ROOT_DIR)/src/os
 OS_SRC := $(OS_DIR)/saramos_arena.c $(OS_DIR)/saramos_owner.c \
-          $(OS_DIR)/saramos_kernel.c $(OS_DIR)/saramos_context.S
+          $(OS_DIR)/saramos_kernel.c $(OS_DIR)/saramos_context.S \
+          $(OS_DIR)/saramos_process.c $(OS_DIR)/saramos_scheduler.c \
+          $(OS_DIR)/saramos_pipe.c
 
 LWIP_DIR := $(ROOT_DIR)/third_party/lwip
 LWIP_SRC := $(LWIP_DIR)/src/core/init.c \
@@ -57,6 +59,15 @@ LIBTTAK_DIR := $(ROOT_DIR)/engine/libttak
 LIBTTAK_A := $(LIBTTAK_DIR)/lib/libttak.a
 
 ENABLE_BUILTIN_EXAMPLES ?= 1
+TOOLS ?=
+TOOLS_LIST := $(shell echo '$(TOOLS)' | tr ',' ' ')
+
+# Metapackage: shell => full userland environment
+ifneq ($(filter shell,$(TOOLS_LIST)),)
+EFFECTIVE_TOOLS := fsutils vi coreutils extrashell
+else
+EFFECTIVE_TOOLS := $(TOOLS_LIST)
+endif
 
 APP_SRC := main.c syscalls.c \
            ethernetif.c http_server.c sd_diskio.c \
@@ -67,6 +78,28 @@ APP_SRC += builtin_programs.c
 CFLAGS_EXTRA += -DENABLE_BUILTIN_EXAMPLES=1
 endif
 
+ifneq ($(filter fsutils,$(EFFECTIVE_TOOLS)),)
+APP_SRC += $(wildcard $(ROOT_DIR)/tools/fsutils/*.c)
+CFLAGS_EXTRA += -DENABLE_TOOL_FSUTILS=1
+endif
+
+ifneq ($(filter vi,$(EFFECTIVE_TOOLS)),)
+APP_SRC += $(wildcard $(ROOT_DIR)/tools/saramos_vi/*.c)
+CFLAGS_EXTRA += -DENABLE_TOOL_VI=1
+endif
+
+ifneq ($(filter coreutils,$(EFFECTIVE_TOOLS)),)
+APP_SRC += $(wildcard $(ROOT_DIR)/tools/coreutils/*.c)
+CFLAGS_EXTRA += -DENABLE_TOOL_COREUTILS=1
+endif
+
+ifneq ($(filter extrashell,$(EFFECTIVE_TOOLS)),)
+APP_SRC += shell.c $(wildcard $(ROOT_DIR)/tools/shell/*.c)
+CFLAGS_EXTRA += -DENABLE_TOOL_EXTRASHELL=1
+else ifneq ($(filter fsutils,$(EFFECTIVE_TOOLS)),)
+APP_SRC += shell.c
+endif
+
 APP_SRC += $(EXTRA_APP_SRCS)
 
 INCLUDES := -I$(ROOT_DIR)/include \
@@ -74,6 +107,10 @@ INCLUDES := -I$(ROOT_DIR)/include \
             -I$(LIBTTAK_DIR)/include \
             -I$(LWIP_DIR)/src/include \
             -I$(FATFS_DIR) \
+            -I$(ROOT_DIR)/tools/fsutils \
+            -I$(ROOT_DIR)/tools/saramos_vi \
+            -I$(ROOT_DIR)/tools/coreutils \
+            -I$(ROOT_DIR)/tools/shell \
             -I.
 
 CROSS_CC := $(BOARD_CC)

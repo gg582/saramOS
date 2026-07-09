@@ -1,5 +1,5 @@
 #include "os/saramos_kernel.h"
-#include <hal/stm32f769i-disc1.h>
+#include <hal/board.h>
 #include <stdio.h>
 
 #define SARAMOS_ICSR_ADDR 0xE000ED04UL

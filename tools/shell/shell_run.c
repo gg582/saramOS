@@ -32,8 +32,7 @@ int shell_interactive_process(saramos_process_t *p)
         i = 0;
         proc_puts("$ ");
         while (1) {
-            PROC_WAIT(p, hal_uart_readable());
-            c = hal_uart_try_getc();
+            PROC_GETC(p, c);
             if (c == '\r' || c == '\n') {
                 proc_puts("\r\n");
                 line[i] = '\0';

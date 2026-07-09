@@ -1,7 +1,7 @@
 #ifndef HAL_GPIO_H
 #define HAL_GPIO_H
 
-#include <hal/stm32f769i-disc1.h>
+#include <hal/board.h>
 
 #ifdef __cplusplus
 extern "C" {
