@@ -2,7 +2,7 @@
 
 ![Screenshot](./saramOS.png)
 
-**saramOS**는 STM32F769I-DISC1 (Cortex-M7)를 타겟으로 하는 POSIX-free 베어메탈 런타임/RTOS 프로젝트입니다. 현재는 작은 resilient RTOS kernel core를 포함하며, TCB 단위 libttak owner context, generation-bound arena, PendSV context switching, HardFault 기반 task eviction 경로를 제공합니다.
+**saramOS**는 STM32F769I-DISCO (Cortex-M7, DISC1 호환)를 기본 타겟으로 하며 DISC1도 지원하는 POSIX-free 베어메탈 런타임/RTOS 프로젝트입니다. 현재는 작은 resilient RTOS kernel core를 포함하며, TCB 단위 libttak owner context, generation-bound arena, PendSV context switching, HardFault 기반 task eviction 경로를 제공합니다.
 
 ---
 
@@ -24,11 +24,11 @@
 
 | 항목 | 사양 |
 |------|------|
-| 보드 | **STM32F769I-DISC1** (STM32F769NIH6) |
+| 보드 | **STM32F769I-DISCO** (STM32F769NIH6, DISC1 호환) |
 | 코어 | ARM Cortex-M7, 216 MHz (현재 예제는 16 MHz HSI로 부팅) |
 | 플래시 | 2 MB (0x0800_0000) |
 | SRAM | 512 KB (0x2000_0000) |
-| 디버거 | 내장 ST-Link/V2-1 (Micro-USB CN14) |
+| 디버거 | 내장 ST-Link/V2 (Micro-USB CN14, DISC1은 ST-Link/V2-1) |
 | UART | USART1 PA9(TX) / PA10(RX), 115200-8-N-1 (ST-Link 가상 COM 포트) |
 
 ---
@@ -63,11 +63,13 @@ brew install openocd make
 
 ```
 saramOS/
-├── Makefile                  # 최상위 오케스트레이션 (APP_DIR, CONFIG 지정)
-├── README.md                 # 이 파일
+├── Makefile                  # 최상위 오케스트레이션 (APP_DIR, BOARD 지정)
+├── README.md                 # 영문 README
+├── README.ko.md              # 이 파일 (한국어)
 ├── ROADMAP.md                # libttak POSIX-free 리팩토링 로드맵
 ├── configs/
-│   └── stm32f769i-disc1      # 보드별 CFLAG/LDFLAG 정의
+│   ├── stm32f769i-disco      # 기본 보드 CFLAG/LDFLAG 정의
+│   └── stm32f769i-disc1      # DISC1 변형 CFLAG/LDFLAG 정의
 ├── engine/
 │   └── libttak/              # libttak 서브모듈 (베어메탈 브랜치)
 │       ├── include/          # 공개 헤더 (ttak/mem/arena_helper.h 등)
@@ -92,24 +94,46 @@ saramOS/
 │   └── README.md             # 예시는 apps/로 이동함
 ├── include/
 │   ├── hal/
-│   │   └── stm32f769i-disc1.h   # 레지스터 정의 전용 HAL
+│   │   ├── board.h           # 보드 중립적 HAL 진입점
+│   │   ├── stm32f769i-disco.h   # 레지스터 정의 전용 HAL
+│   │   └── stm32f769i-disc1.h   # DISC1 변형 HAL
 │   └── os/
 │       ├── saramos_arena.h   # saramOS arena 래퍼 헤더
 │       ├── saramos_kernel.h  # TCB, scheduler, eviction API
 │       └── saramos_owner.h   # saramOS owner 래퍼 헤더
 ├── src/
-│   ├── hal/stm32f769i-disc1/
-│   │   ├── hal_sys.c         # 캐시/클록/FLASH 지연 초기화
-│   │   ├── hal_uart.c        # USART1 드라이버
-│   │   ├── linker.ld         # 링커 스크립트
-│   │   └── startup.S         # 벡터 테이블 + Reset_Handler
+│   ├── hal/stm32f769i-disco/  # 기본 보드 HAL
+│   │   ├── hal_eth.c
+│   │   ├── hal_gpio.c
+│   │   ├── hal_sdmmc.c
+│   │   ├── hal_sys.c
+│   │   ├── hal_uart.c
+│   │   ├── linker.ld
+│   │   └── startup.S
+│   ├── hal/stm32f769i-disc1/  # DISC1 변형 HAL
+│   │   ├── hal_eth.c
+│   │   ├── hal_gpio.c
+│   │   ├── hal_sdmmc.c
+│   │   ├── hal_sys.c
+│   │   ├── hal_uart.c
+│   │   ├── linker.ld
+│   │   └── startup.S
 │   └── os/
 │       ├── saramos_arena.c   # libttak arena_helper 래퍼
 │       ├── saramos_context.S # PendSV/HardFault Cortex-M7 assembly
 │       ├── saramos_kernel.c  # Ready queue, scheduling, forced reclaim
 │       └── saramos_owner.c   # libttak owner 래퍼
 ├── tools/
-│   └── stm32_flash.sh        # OpenOCD 플래싱 스크립트
+│   ├── boot/                 # 부트로더 보조 파일 (커스텀 링커 스크립트, 스타트업)
+│   ├── fsutils/              # SD 카드 파일시스템 유틸리티 (cat, echo, mkdir, rm, tee)
+│   ├── coreutils/            # 최소 Linux 스타일 유틸리티 (cp, mv, ls, grep, sort 등)
+│   ├── shell/                # 향상된 Unix 스타일 셸 (환경 변수, glob, for/if/source)
+│   ├── vi/                   # vi 에디터 포트 및 saramOS 베어메탈 적응 레이어
+│   │   └── saramos_port/     # FatFs / UART에 매핑한 POSIX 형태 stub
+│   ├── fs_test_capture.py    # fsutils / shell / vi용 시리얼 테스트 캡처
+│   ├── sd_test_capture.py    # SD 카드 디버그용 시리얼 테스트 캡처
+│   ├── stm32_flash.sh        # OpenOCD 플래싱 스크립트
+│   └── test_board.py         # 시리얼 콘솔 기본 보드 회귀 테스트
 └── third_party/
     ├── newlib_posix/
     └── u-boot/
@@ -138,7 +162,7 @@ make
 
 ```
    text    data     bss     dec     hex filename
-  31513     292  174248  206053   324e5 build/stm32f769i-disc1/saramos.elf
+  31513     292  174248  206053   324e5 build/stm32f769i-disco/saramos.elf
 ```
 
 - **text**: 플래시에 기록되는 코드/RO 데이터
@@ -156,12 +180,29 @@ make APP_DIR=os/default
 # 원하는 앱 디렉토리 빌드
 make APP_DIR=apps/example/game/sudoku
 
+# 선택적 도구(fsutils, vi)를 이미지에 포함해 빌드
+make TOOLS=fsutils,vi
+make APP_DIR=apps/example/game/sudoku TOOLS=fsutils,vi
+
+# 전체 Linux 스타일 셸 메타패키지 활성화
+make TOOLS=shell
+make APP_DIR=apps/example/game/sudoku TOOLS=shell
+
 # 현재 APP_DIR 빌드 정리
 make clean
 
 # 현재 APP_DIR 섹션 크기 확인
 make size
 ```
+
+`TOOLS` 변수는 이미지에 링크할 선택적 구성 요소의 쉼표 구분 목록입니다. `shell`은 `fsutils`, `vi`, `coreutils`, 향상된 셸을 한 번에 포함하는 메타패키지입니다:
+
+- `fsutils` — SD 카드 파일 유틸리티(`sd rm`, `sd mkdir`, `sd echo`, `sd tee`)와 `sd mountfs` 미니 셸을 추가합니다.
+- `vi` — `fsutils`가 필요하며, `sd vi <file>` 라인 에디터를 추가합니다.
+- `coreutils` — 셸 안에서 사용할 최소 Linux 스타일 파일/텍스트 유틸리티(`cp`, `mv`, `ls`, `grep`, `sort`, `tac`, `nl`, `fold`, `od`, `strings`, `printf`, `paste`, `xargs` 등)를 추가합니다.
+- `shell` — 메타패키지; `fsutils`, `vi`, `coreutils`, 향상된 셸(환경 변수, glob, 간단한 제어 흐름)을 모두 포함합니다.
+
+기본적으로는 모든 도구가 비활성화되어 있어 바이너리 크기를 작게 유지합니다.
 
 ### 3) 개별 단계 빌드
 
@@ -205,8 +246,8 @@ openocd -f board/stm32f769i-disco.cfg \
     -c "reset init" \
     -c "halt" \
     -c "flash probe 0" \
-    -c "flash write_image erase build/stm32f769i-disc1/saramos.bin 0x08000000" \
-    -c "verify_image build/stm32f769i-disc1/saramos.bin 0x08000000" \
+    -c "flash write_image erase build/stm32f769i-disco/saramos.bin 0x08000000" \
+    -c "verify_image build/stm32f769i-disco/saramos.bin 0x08000000" \
     -c "reset halt" \
     -c "reset run" \
     -c "shutdown"
@@ -226,8 +267,8 @@ openocd -f board/stm32f769i-disco.cfg
 cd apps/example/game/sudoku
 openocd -f board/stm32f769i-disco.cfg \
     -c "init; reset init; halt; flash probe 0" \
-    -c "flash write_image erase build/stm32f769i-disc1/saramos.bin 0x08000000" \
-    -c "verify_image build/stm32f769i-disc1/saramos.bin 0x08000000" \
+    -c "flash write_image erase build/stm32f769i-disco/saramos.bin 0x08000000" \
+    -c "verify_image build/stm32f769i-disco/saramos.bin 0x08000000" \
     -c "reset halt; reset run; shutdown"
 ```
 
@@ -236,13 +277,13 @@ openocd -f board/stm32f769i-disco.cfg \
 `st-link` CLI 도구가 설치되어 있다면:
 
 ```bash
-st-flash --reset write build/stm32f769i-disc1/saramos.bin 0x08000000
+st-flash --reset write build/stm32f769i-disco/saramos.bin 0x08000000
 ```
 
 또는 Windows/Mac에서 **STM32CubeProgrammer** GUI를 사용할 수 있습니다.
 - Interface: ST-Link
 - Address: `0x08000000`
-- File: `apps/example/game/sudoku/build/stm32f769i-disc1/saramos.bin`
+- File: `apps/example/game/sudoku/build/stm32f769i-disco/saramos.bin`
 
 ### 방법 D: GDB + OpenOCD (디버깅 플래싱)
 
@@ -251,7 +292,7 @@ st-flash --reset write build/stm32f769i-disc1/saramos.bin 0x08000000
 openocd -f board/stm32f769i-disco.cfg
 
 # 터미널 2
-arm-none-eabi-gdb build/stm32f769i-disc1/saramos.elf
+arm-none-eabi-gdb build/stm32f769i-disco/saramos.elf
 (gdb) target extended-remote localhost:3333
 (gdb) load          # 플래시에 로드
 (gdb) monitor reset halt
@@ -274,7 +315,7 @@ screen /dev/ttyACM0 115200
 정상 부팅 시 출력 예시:
 
 ```
-=== saramOS on STM32F769I-DISC1 ===
+=== saramOS on STM32F769I-DISCO ===
 Type 'help' for available commands.
 
 saramOS: resilient kernel core init OK
@@ -311,6 +352,106 @@ program run mycalc
 ```
 
 지원 명령은 `set`, `add`, `sub`, `mul`, `div`, `mod`, `print`입니다. 프로그램은 RAM에 저장되며 재부팅하면 초기화됩니다.
+
+### 선택적 도구
+
+`TOOLS=fsutils,vi`로 빌드하면 셸에 다음과 같은 추가 SD 카드 명령이 생깁니다:
+
+```text
+sd rm <file>              # 파일이나 디렉토리 삭제
+sd mkdir <dir>            # 디렉토리 생성
+sd echo [text]...         # 콘솔에 텍스트 출력
+sd tee <file> <text>...   # 파일에 텍스트 쓰기
+sd mountfs                # 최소 Unix 형태 셸 진입
+sd vi <file>              # 최소 vi 포트로 파일 편집
+```
+
+`sd mountfs` 안에서는 `ls`, `cd`, `pwd`, `cat`, `rm`, `mkdir`, `echo`, `tee`, `vi`, `exit`를 사용할 수 있습니다.
+
+#### 전체 셸 환경 (`TOOLS=shell`)
+
+`TOOLS=shell`은 `fsutils`, `vi`, `coreutils`, 향상된 셸을 모두 포함하는 메타패키지입니다. `sd mountfs`에 진입하면 다음과 같은 최소 Linux 스타일 환경을 사용할 수 있습니다.
+
+**파일 및 디렉토리 유틸리티**
+```text
+ls [-l] [path]            # 파일 목록 출력
+cp <src> <dst>            # 파일 복사
+mv <src> <dst>            # 파일 이동/이름 변경
+rm <path>                 # 파일이나 디렉토리 삭제
+mkdir <dir>               # 디렉토리 생성
+touch <file>              # 파일 생성 또는 갱신
+chmod <mode> <file>       # 파일 속성 변경 (FatFs f_chmod)
+find [path] [name]        # 일치하는 항목 나열
+cd <dir>                  # 작업 디렉토리 변경
+pwd                       # 현재 작업 디렉토리 출력
+which <name>              # 명령 존재 여부 확인
+```
+
+**텍스트 및 정보 유틸리티**
+```text
+cat <file>                # 파일 내용 출력
+head [-n N] <file>        # 처음 N줄
+tail [-n N] <file>        # 마지막 N줄
+wc [-lwc] <file>          # 줄/단어/문자 수
+grep <pattern> <file>     # 간단한 부분 문자열 검색
+sort <file>               # 줄 단위 정렬
+uniq <file>               # 인접한 중복 줄 제거
+diff <file1> <file2>      # 줄 단위 차이
+cut -c N <file>           # 문자 추출
+cut -d D -f N <file>      # 구분자로 필드 추출
+tr <set1> <set2> <file>   # 문자 변환
+rev <file>                # 각 줄 뒤집기
+```
+
+**셸 및 시스템 유틸리티**
+```text
+echo [text]...            # 인자 출력
+clear                     # 화면 지우기
+sleep <seconds>           # N초 대기
+seq [first] [last]        # 숫자 시퀀스 출력
+yes [text]                # 텍스트 반복 출력
+true / false              # 항상 0 / 1 종료
+uname [-a]                # 시스템 이름 출력
+uptime                    # 부팅 후 경과 시간 출력
+date                      # 현재 날짜/시간 스텁 출력
+df                        # 디스크 여유 공간 출력
+du [path]                 # 디렉토리 크기 출력
+env                       # 환경 변수 출력
+export VAR=value          # 환경 변수 설정
+unset VAR                 # 환경 변수 삭제
+```
+
+**셸 기능**
+- 환경 변수 및 `$VAR` 확장.
+- 간단한 glob: `*`(임의 문자열), `?`(한 문자).
+- 제어 흐름: `if test ...; then ...; fi`, `for var in ...; do ...; done`.
+- 스크립트 포함: `source <file>`.
+- 내장 명령: `cd`, `pwd`, `echo`, `clear`, `exit`, `export`, `unset`, `env`.
+
+**아직 지원하지 않음**: 파이프라인(`|`), 리다이렉션(`>`, `<`, `>>`), 백그라운드 실행(`&`), 인용 문자, 명령 치환(`$()`).
+
+예제 세션:
+
+```text
+saramOS> sd mountfs
+$ export GREET=hello
+$ echo $GREET world
+hello world
+$ for f in *.txt; do echo file: $f; done
+$ if test -f readme.txt; then echo exists; fi
+$ exit
+```
+
+### 시리얼 테스트 스크립트
+
+UART 콘솔을 통해 일반적인 보드 검사를 자동화하는 Python 스크립트가 있습니다. `pyserial`이 필요합니다:
+
+```bash
+pip install pyserial
+python3 tools/test_board.py      # 기본 보드 회귀 (help, sd, net, http)
+python3 tools/sd_test_capture.py # SD 카드 init/ls/cat 점검
+python3 tools/fs_test_capture.py # fsutils / shell / vi 동작 확인
+```
 
 ---
 
@@ -417,7 +558,7 @@ saramos_owner_destroy(&owner);
 
 ### 링커 맵 확인
 
-`apps/example/game/sudoku/build/stm32f769i-disc1/saramos.map` 파일을 통해 심볼 주소와 섹션 배치를 확인할 수 있습니다.
+`apps/example/game/sudoku/build/stm32f769i-disco/saramos.map` 파일을 통해 심볼 주소와 섹션 배치를 확인할 수 있습니다.
 
 ### HardFault 발생 시
 

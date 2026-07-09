@@ -2,7 +2,7 @@
 
 ![Screenshot](./saramOS.png)
 
-**saramOS** is a POSIX-free bare-metal runtime/RTOS project targeting STM32F769I-DISC1 (Cortex-M7). It now includes a small resilient RTOS kernel core: TCB-owned libttak owner contexts, generation-bound arenas, PendSV context switching, and a HardFault eviction path for failed tasks.
+**saramOS** is a POSIX-free bare-metal runtime/RTOS project targeting STM32F769I-DISCO (Cortex-M7, DISC1 compatible). It now includes a small resilient RTOS kernel core: TCB-owned libttak owner contexts, generation-bound arenas, PendSV context switching, and a HardFault eviction path for failed tasks.
 
 ---
 
@@ -24,11 +24,11 @@
 
 | Item | Specification |
 |------|------|
-| Board | **STM32F769I-DISC1** (STM32F769NIH6) |
+| Board | **STM32F769I-DISCO** (STM32F769NIH6, DISC1 compatible) |
 | Core | ARM Cortex-M7, 216 MHz (current example boots with 16 MHz HSI) |
 | Flash | 2 MB (0x0800_0000) |
 | SRAM | 512 KB (0x2000_0000) |
-| Debugger | Embedded ST-Link/V2-1 (Micro-USB CN14) |
+| Debugger | Embedded ST-Link/V2 (Micro-USB CN14; DISC1 uses ST-Link/V2-1) |
 | UART | USART1 PA9(TX) / PA10(RX), 115200-8-N-1 (ST-Link Virtual COM Port) |
 
 ---
@@ -63,12 +63,13 @@ brew install openocd make
 
 ```
 saramOS/
-├── Makefile                  # Top-level orchestration (specifies APP_DIR, CONFIG)
+├── Makefile                  # Top-level orchestration (specifies APP_DIR, BOARD)
 ├── README.md                 # This file (English)
 ├── README.ko.md              # Korean version of README
 ├── ROADMAP.md                # Roadmap for libttak POSIX-free refactoring
 ├── configs/
-│   └── stm32f769i-disc1      # Board-specific CFLAG/LDFLAG definitions
+│   ├── stm32f769i-disco      # Default board CFLAG/LDFLAG definitions
+│   └── stm32f769i-disc1      # DISC1 variant CFLAG/LDFLAG definitions
 ├── engine/
 │   └── libttak/              # libttak submodule (bare-metal branch)
 │       ├── include/          # Public headers (ttak/mem/arena_helper.h, etc.)
@@ -93,24 +94,46 @@ saramOS/
 │   └── README.md             # Examples moved to apps/
 ├── include/
 │   ├── hal/
-│   │   └── stm32f769i-disc1.h   # Register definition HAL
+│   │   ├── board.h              # Board-neutral HAL entry point
+│   │   ├── stm32f769i-disco.h   # Register definition HAL
+│   │   └── stm32f769i-disc1.h   # DISC1 variant HAL
 │   └── os/
 │       ├── saramos_arena.h   # saramOS arena wrapper header
 │       ├── saramos_kernel.h  # TCB, scheduler, eviction API
 │       └── saramos_owner.h   # saramOS owner wrapper header
 ├── src/
-│   ├── hal/stm32f769i-disc1/
-│   │   ├── hal_sys.c         # Cache/Clock/FLASH latency initialization
-│   │   ├── hal_uart.c        # USART1 driver
-│   │   ├── linker.ld         # Linker script
-│   │   └── startup.S         # Vector table + Reset_Handler
+│   ├── hal/stm32f769i-disco/  # Default board HAL
+│   │   ├── hal_eth.c
+│   │   ├── hal_gpio.c
+│   │   ├── hal_sdmmc.c
+│   │   ├── hal_sys.c
+│   │   ├── hal_uart.c
+│   │   ├── linker.ld
+│   │   └── startup.S
+│   ├── hal/stm32f769i-disc1/  # DISC1 variant HAL
+│   │   ├── hal_eth.c
+│   │   ├── hal_gpio.c
+│   │   ├── hal_sdmmc.c
+│   │   ├── hal_sys.c
+│   │   ├── hal_uart.c
+│   │   ├── linker.ld
+│   │   └── startup.S
 │   └── os/
 │       ├── saramos_arena.c   # libttak arena_helper wrapper
 │       ├── saramos_context.S # PendSV/HardFault Cortex-M7 assembly
 │       ├── saramos_kernel.c  # Ready queue, scheduling, forced reclaim
 │       └── saramos_owner.c   # libttak owner wrapper
 ├── tools/
-│   └── stm32_flash.sh        # OpenOCD flashing script
+│   ├── boot/                 # Boot loader helper files (custom linker script, startup)
+│   ├── fsutils/              # SD-card filesystem utilities (cat, echo, mkdir, rm, tee)
+│   ├── coreutils/            # Minimal Linux-style utilities (cp, mv, ls, grep, sort, etc.)
+│   ├── shell/                # Enhanced Unix-like shell (environment, glob, for/if/source)
+│   ├── vi/                   # vi editor port with saramOS bare-metal adaptation layer
+│   │   └── saramos_port/     # POSIX-like stubs mapped to FatFs / UART
+│   ├── fs_test_capture.py    # Serial test capture for fsutils / shell / vi
+│   ├── sd_test_capture.py    # Serial test capture for SD-card debug
+│   ├── stm32_flash.sh        # OpenOCD flashing script
+│   └── test_board.py         # Basic board regression over the serial console
 └── third_party/
     ├── newlib_posix/
     └── u-boot/
@@ -139,7 +162,7 @@ Example output:
 
 ```
    text    data     bss     dec     hex filename
-  31513     292  174248  206053   324e5 build/stm32f769i-disc1/saramos.elf
+  31513     292  174248  206053   324e5 build/stm32f769i-disco/saramos.elf
 ```
 
 - **text**: Code and RO data written to flash
@@ -157,12 +180,29 @@ make APP_DIR=os/default
 # Build any app directory that has a Makefile
 make APP_DIR=apps/example/game/sudoku
 
+# Enable optional tools (fsutils, vi) in the image
+make TOOLS=fsutils,vi
+make APP_DIR=apps/example/game/sudoku TOOLS=fsutils,vi
+
+# Enable the full Linux-style shell metapackage
+make TOOLS=shell
+make APP_DIR=apps/example/game/sudoku TOOLS=shell
+
 # Clean up the current APP_DIR build
 make clean
 
 # Check section sizes for the current APP_DIR
 make size
 ```
+
+The `TOOLS` variable is a comma-separated list of optional components linked into the image. `shell` is a metapackage that automatically enables `fsutils`, `vi`, `coreutils`, and the enhanced shell:
+
+- `fsutils` — adds SD-card file utilities (`sd rm`, `sd mkdir`, `sd echo`, `sd tee`) and the `sd mountfs` mini-shell.
+- `vi` — requires `fsutils`; adds the `sd vi <file>` line editor.
+- `coreutils` — adds minimal Linux-style file and text utilities inside the shell (`cp`, `mv`, `ls`, `grep`, `sort`, `tac`, `nl`, `fold`, `od`, `strings`, `printf`, `paste`, `xargs`, etc.).
+- `shell` — metapackage; enables `fsutils`, `vi`, `coreutils`, and the enhanced shell with environment variables, globbing, and simple control flow.
+
+All tools are disabled by default to keep the binary small.
 
 ### 3) Individual Build Steps
 
@@ -206,8 +246,8 @@ openocd -f board/stm32f769i-disco.cfg \
     -c "reset init" \
     -c "halt" \
     -c "flash probe 0" \
-    -c "flash write_image erase build/stm32f769i-disc1/saramos.bin 0x08000000" \
-    -c "verify_image build/stm32f769i-disc1/saramos.bin 0x08000000" \
+    -c "flash write_image erase build/stm32f769i-disco/saramos.bin 0x08000000" \
+    -c "verify_image build/stm32f769i-disco/saramos.bin 0x08000000" \
     -c "reset halt" \
     -c "reset run" \
     -c "shutdown"
@@ -227,8 +267,8 @@ openocd -f board/stm32f769i-disco.cfg
 cd apps/example/game/sudoku
 openocd -f board/stm32f769i-disco.cfg \
     -c "init; reset init; halt; flash probe 0" \
-    -c "flash write_image erase build/stm32f769i-disc1/saramos.bin 0x08000000" \
-    -c "verify_image build/stm32f769i-disc1/saramos.bin 0x08000000" \
+    -c "flash write_image erase build/stm32f769i-disco/saramos.bin 0x08000000" \
+    -c "verify_image build/stm32f769i-disco/saramos.bin 0x08000000" \
     -c "reset halt; reset run; shutdown"
 ```
 
@@ -237,13 +277,13 @@ openocd -f board/stm32f769i-disco.cfg \
 If you have the `st-link` CLI tool installed:
 
 ```bash
-st-flash --reset write build/stm32f769i-disc1/saramos.bin 0x08000000
+st-flash --reset write build/stm32f769i-disco/saramos.bin 0x08000000
 ```
 
 Alternatively, you can use the **STM32CubeProgrammer** GUI on Windows/Mac:
 - Interface: ST-Link
 - Address: `0x08000000`
-- File: `apps/example/game/sudoku/build/stm32f769i-disc1/saramos.bin`
+- File: `apps/example/game/sudoku/build/stm32f769i-disco/saramos.bin`
 
 ### Method D: GDB + OpenOCD (Debugging & Flashing)
 
@@ -252,7 +292,7 @@ Alternatively, you can use the **STM32CubeProgrammer** GUI on Windows/Mac:
 openocd -f board/stm32f769i-disco.cfg
 
 # Terminal 2
-arm-none-eabi-gdb build/stm32f769i-disc1/saramos.elf
+arm-none-eabi-gdb build/stm32f769i-disco/saramos.elf
 (gdb) target extended-remote localhost:3333
 (gdb) load          # Load to flash
 (gdb) monitor reset halt
@@ -275,7 +315,7 @@ screen /dev/ttyACM0 115200
 Expected output on successful boot:
 
 ```
-=== saramOS on STM32F769I-DISC1 ===
+=== saramOS on STM32F769I-DISCO ===
 Type 'help' for available commands.
 
 saramOS: resilient kernel core init OK
@@ -312,6 +352,106 @@ program run mycalc
 ```
 
 Supported program instructions are `set`, `add`, `sub`, `mul`, `div`, `mod`, and `print`. Programs are stored in RAM and are reset on reboot.
+
+### Optional tools
+
+When built with `TOOLS=fsutils,vi`, the shell gains extra SD-card commands:
+
+```text
+sd rm <file>              # remove a file or directory
+sd mkdir <dir>            # create a directory
+sd echo [text]...         # print text to the console
+sd tee <file> <text>...   # write text to a file
+sd mountfs                # enter a minimal Unix-like shell
+sd vi <file>              # edit a file with the minimal vi port
+```
+
+Inside `sd mountfs` the mini-shell supports: `ls`, `cd`, `pwd`, `cat`, `rm`, `mkdir`, `echo`, `tee`, `vi`, and `exit`.
+
+#### Full shell environment (`TOOLS=shell`)
+
+`TOOLS=shell` is a metapackage that pulls in `fsutils`, `vi`, `coreutils`, and the enhanced shell. After entering `sd mountfs`, you get a minimal Linux-style environment with the following extras:
+
+**File and directory utilities**
+```text
+ls [-l] [path]            # list files
+cp <src> <dst>            # copy a file
+mv <src> <dst>            # move or rename a file
+rm <path>                 # remove a file or directory
+mkdir <dir>               # create a directory
+touch <file>              # create or update a file
+chmod <mode> <file>       # change file attributes (FatFs f_chmod)
+find [path] [name]        # list matching entries
+cd <dir>                  # change working directory
+pwd                       # print working directory
+which <name>              # report whether a command exists
+```
+
+**Text and information utilities**
+```text
+cat <file>                # print file contents
+head [-n N] <file>        # first N lines
+tail [-n N] <file>        # last N lines
+wc [-lwc] <file>          # line/word/char count
+grep <pattern> <file>     # simple substring search
+sort <file>               # sort lines
+uniq <file>               # remove adjacent duplicate lines
+diff <file1> <file2>      # line-by-line difference
+cut -c N <file>           # extract characters
+cut -d D -f N <file>      # extract fields by delimiter
+tr <set1> <set2> <file>   # translate characters
+rev <file>                # reverse each line
+```
+
+**Shell and system utilities**
+```text
+echo [text]...            # print arguments
+clear                     # clear the screen
+sleep <seconds>           # pause for N seconds
+seq [first] [last]        # print a sequence of numbers
+yes [text]                # repeatedly print text
+true / false              # always exit 0 / 1
+uname [-a]                # print system name
+uptime                    # print time since boot
+date                      # print current date/time stub
+df                        # print disk free space
+du [path]                 # print directory size
+env                       # print environment variables
+export VAR=value          # set environment variable
+unset VAR                 # remove environment variable
+```
+
+**Shell features**
+- Environment variables and `$VAR` expansion.
+- Simple globbing with `*` (any characters) and `?` (single character).
+- Control flow: `if test ...; then ...; fi` and `for var in ...; do ...; done`.
+- Script inclusion: `source <file>`.
+- Built-ins: `cd`, `pwd`, `echo`, `clear`, `exit`, `export`, `unset`, `env`.
+
+**Not yet supported**: pipelines (`|`), redirections (`>`, `<`, `>>`), background jobs (`&`), quoted strings, and command substitution (`$()`).
+
+Example session:
+
+```text
+saramOS> sd mountfs
+$ export GREET=hello
+$ echo $GREET world
+hello world
+$ for f in *.txt; do echo file: $f; done
+$ if test -f readme.txt; then echo exists; fi
+$ exit
+```
+
+### Serial test scripts
+
+Several Python scripts automate common board checks over the UART console. They require `pyserial`:
+
+```bash
+pip install pyserial
+python3 tools/test_board.py      # basic board regression (help, sd, net, http)
+python3 tools/sd_test_capture.py # SD-card init/ls/cat checks
+python3 tools/fs_test_capture.py # fsutils / shell / vi exercise
+```
 
 ---
 
@@ -418,7 +558,7 @@ Through this structure, each driver or task in saramOS can have **its own owner*
 
 ### Checking the Linker Map
 
-You can inspect symbol addresses and section layouts in `apps/example/game/sudoku/build/stm32f769i-disc1/saramos.map`.
+You can inspect symbol addresses and section layouts in `apps/example/game/sudoku/build/stm32f769i-disco/saramos.map`.
 
 ### In Case of HardFault
 
