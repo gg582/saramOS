@@ -90,14 +90,19 @@ ssize_t saramos_write(int fd, const void *buf, size_t count)
     return (ssize_t)bw;
 }
 
+static int saramos_fresult_to_errno(FRESULT res)
+{
+    return (res == FR_OK) ? 0 : -1;
+}
+
 int saramos_close(int fd)
 {
     if (fd < 0 || fd >= SARAMOS_FD_MAX || !fd_table[fd].used)
         return -1;
 
-    f_close(&fd_table[fd].fil);
+    FRESULT res = f_close(&fd_table[fd].fil);
     fd_table[fd].used = 0;
-    return 0;
+    return saramos_fresult_to_errno(res);
 }
 
 off_t saramos_lseek(int fd, off_t offset, int whence)

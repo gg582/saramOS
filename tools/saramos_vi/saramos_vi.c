@@ -56,17 +56,26 @@ static void vi_save(const char *path)
 {
     int fd = saramos_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0);
     if (fd < 0) {
-        saramos_puts("vi: cannot write\r\n");
+        saramos_puts("vi: cannot open file\r\n");
         return;
     }
 
-    for (int i = 0; i < vi_line_count; i++) {
-        saramos_write(fd, vi_lines[i], strlen(vi_lines[i]));
-        saramos_write(fd, "\r\n", 2);
+    int ok = 1;
+    for (int i = 0; i < vi_line_count && ok; i++) {
+        size_t len = strlen(vi_lines[i]);
+        if ((size_t)saramos_write(fd, vi_lines[i], len) != len)
+            ok = 0;
+        else if (saramos_write(fd, "\r\n", 2) != 2)
+            ok = 0;
     }
 
-    saramos_close(fd);
-    saramos_puts("written\r\n");
+    if (saramos_close(fd) < 0)
+        ok = 0;
+
+    if (ok)
+        saramos_puts("written\r\n");
+    else
+        saramos_puts("vi: write failed\r\n");
 }
 
 static void vi_insert_line_at(const char *text, int pos)

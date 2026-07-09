@@ -24,7 +24,8 @@
 #define SDMMC_CLK_FAST_DIV  1U    /* 16 MHz / (2*1)  = 8 MHz  */
 
 #define SD_CMD_ERR_MASK     (SDMMC_STA_CCRCFAIL | SDMMC_STA_CTIMEOUT)
-#define SD_DATA_ERR_MASK    (SDMMC_STA_DCRCFAIL | SDMMC_STA_DTIMEOUT | SDMMC_STA_RXOVERR)
+#define SD_DATA_ERR_MASK    (SDMMC_STA_DCRCFAIL | SDMMC_STA_DTIMEOUT | \
+                             SDMMC_STA_RXOVERR | SDMMC_STA_TXUNDERR)
 
 static uint16_t sd_rca;
 static uint32_t sd_capacity_blocks;
@@ -110,7 +111,7 @@ static int sdmmc_wait_data_end(uint32_t timeout_us)
         uint32_t sta = SDMMC2->STA;
         if (sta & SDMMC_STA_DTIMEOUT)
             return HAL_SDMMC_TIMEOUT;
-        if (sta & SDMMC_STA_DCRCFAIL)
+        if (sta & (SDMMC_STA_DCRCFAIL | SDMMC_STA_TXUNDERR))
             return HAL_SDMMC_ERR;
         if (sta & SDMMC_STA_DATAEND)
             return HAL_SDMMC_OK;
@@ -180,6 +181,30 @@ static int sdmmc_send_cmd_raw(uint8_t cmd_idx, uint32_t arg, int resp_type, uint
 
     sdmmc_clear_flags();
     return HAL_SDMMC_OK;
+}
+
+/*
+ * Poll CMD13 (SEND_STATUS) until the card leaves the programming state and
+ * returns to the transfer state with READY_FOR_DATA asserted.  This is
+ * required after any block write before the next command can be issued.
+ */
+static int sdmmc_wait_card_ready(uint32_t timeout_us)
+{
+    uint32_t r;
+
+    while (timeout_us--) {
+        int rc = sdmmc_send_cmd_raw(13, ((uint32_t)sd_rca << 16), 1, &r);
+        if (rc != HAL_SDMMC_OK)
+            return rc;
+
+        /* R1: bits [12:9] = current state, bit 8 = READY_FOR_DATA.
+         * State 4 (TRAN) and READY_FOR_DATA means programming is done. */
+        if (((r >> 9) & 0xFU) == 4U && (r & (1U << 8)))
+            return HAL_SDMMC_OK;
+
+        sd_delay(10);
+    }
+    return HAL_SDMMC_TIMEOUT;
 }
 
 /* Reserved for 4-bit mode debugging: switch to 4-bit bus via ACMD6. */
@@ -271,6 +296,14 @@ static int sdmmc_write_block(uint32_t lba, const uint8_t *buf)
     sdmmc_fifo_write(buf, HAL_SDMMC_BLOCK_SIZE / 4U);
 
     rc = sdmmc_wait_data_end(100000U);
+    if (rc != HAL_SDMMC_OK) {
+        sdmmc_clear_flags();
+        return rc;
+    }
+
+    /* Wait for the card to finish programming the block before the next
+     * command is issued. */
+    rc = sdmmc_wait_card_ready(2000000U);
     if (rc != HAL_SDMMC_OK) {
         sdmmc_clear_flags();
         return rc;

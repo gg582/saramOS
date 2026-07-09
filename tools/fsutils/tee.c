@@ -29,17 +29,36 @@ int saramos_tee(int argc, char *argv[])
     for (int i = 2; i < argc; i++) {
         hal_uart_puts(argv[i]);
         UINT bw;
-        f_write(&fil, argv[i], strlen(argv[i]), &bw);
+        FRESULT wr = f_write(&fil, argv[i], strlen(argv[i]), &bw);
+        if (wr != FR_OK || bw != strlen(argv[i])) {
+            hal_uart_puts("tee: write error\r\n");
+            f_close(&fil);
+            return 1;
+        }
         if (i + 1 < argc) {
             hal_uart_puts(" ");
-            f_write(&fil, " ", 1, &bw);
+            wr = f_write(&fil, " ", 1, &bw);
+            if (wr != FR_OK || bw != 1) {
+                hal_uart_puts("tee: write error\r\n");
+                f_close(&fil);
+                return 1;
+            }
         }
     }
 
     hal_uart_puts("\r\n");
     UINT bw;
-    f_write(&fil, "\r\n", 2, &bw);
+    FRESULT wr = f_write(&fil, "\r\n", 2, &bw);
+    if (wr != FR_OK || bw != 2) {
+        hal_uart_puts("tee: write error\r\n");
+        f_close(&fil);
+        return 1;
+    }
 
-    f_close(&fil);
+    FRESULT cl = f_close(&fil);
+    if (cl != FR_OK) {
+        hal_uart_puts("tee: close error\r\n");
+        return 1;
+    }
     return 0;
 }

@@ -76,3 +76,30 @@ void scb_clean_dcache(const void *addr, uint32_t len)
     dsb_barrier();
     isb_barrier();
 }
+
+#define SYSTICK_BASE    0xE000E010U
+#define SYSTICK_CSR     (*(volatile uint32_t *)(SYSTICK_BASE + 0x00U))
+#define SYSTICK_RVR     (*(volatile uint32_t *)(SYSTICK_BASE + 0x04U))
+#define SYSTICK_CVR     (*(volatile uint32_t *)(SYSTICK_BASE + 0x08U))
+
+#define SYSTICK_ENABLE  (1U << 0)
+#define SYSTICK_TICKINT (1U << 1)
+#define SYSTICK_CLKSOURCE (1U << 2)
+
+/* System clock is HSI 16 MHz. */
+#define SYSCLK_HZ       16000000U
+#define SYSTICK_RELOAD  ((SYSCLK_HZ / 1000U) - 1U)
+
+extern volatile uint32_t saramos_tick_ms;
+
+void hal_systick_init(void)
+{
+    SYSTICK_CVR = 0;
+    SYSTICK_RVR = SYSTICK_RELOAD;
+    SYSTICK_CSR = SYSTICK_ENABLE | SYSTICK_TICKINT | SYSTICK_CLKSOURCE;
+}
+
+void SysTick_Handler(void)
+{
+    saramos_tick_ms++;
+}
