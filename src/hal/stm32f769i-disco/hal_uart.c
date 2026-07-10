@@ -1,5 +1,11 @@
 #include "hal_uart.h"
 
+/* Weak hook so the graphical shell can mirror UART output. */
+__attribute__((weak)) void hal_uart_output_hook(char c)
+{
+    (void)c;
+}
+
 void hal_uart_init(void)
 {
     /* Enable GPIOA and USART1 clocks */
@@ -24,8 +30,8 @@ void hal_uart_init(void)
     GPIOA_AFRH &= ~((0xFU << ((9 - 8) * 4)) | (0xFU << ((10 - 8) * 4)));
     GPIOA_AFRH |= ((7U << ((9 - 8) * 4)) | (7U << ((10 - 8) * 4)));
 
-    /* Baudrate 115200 @ 16 MHz (HSI) -> 16000000/115200 = 139 */
-    USART1_BRR = 139;
+    /* Baudrate 115200 @ 84 MHz (APB2 = HCLK/2 = 168/2) -> 84000000/115200 = 729 */
+    USART1_BRR = 729;
 
     /* Disable overrun detection so ORE never blocks new incoming bytes. */
     USART1_CR3 |= USART_CR3_OVRDIS;
@@ -37,6 +43,7 @@ void hal_uart_init(void)
 
 void hal_uart_putc(char c)
 {
+    hal_uart_output_hook(c);
     while (!(USART1_ISR & USART_ISR_TXE))
         ;
     USART1_TDR = (uint8_t)c;

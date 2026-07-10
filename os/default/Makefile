@@ -14,6 +14,21 @@ BOARD_BUILD_DIR := $(BUILD_DIR)/$(BOARD)
 HAL_DIR := $(ROOT_DIR)/src/hal/$(BOARD)
 HAL_SRC := $(HAL_DIR)/hal_uart.c $(HAL_DIR)/hal_sys.c \
            $(HAL_DIR)/hal_gpio.c $(HAL_DIR)/hal_eth.c $(HAL_DIR)/hal_sdmmc.c
+
+# Extra display/SDRAM/LVGL port sources for the graphical-shell app.
+GFX_HAL_SRC := $(HAL_DIR)/hal_sdram.c $(HAL_DIR)/hal_display.c $(HAL_DIR)/lvgl_port.c
+
+LVGL_DIR := $(ROOT_DIR)/third_party/lvgl
+LVGL_SRC := $(LVGL_DIR)/src/lvgl.c \
+            $(LVGL_DIR)/src/misc/lv_style.c \
+            $(LVGL_DIR)/src/font/lv_font.c \
+            $(LVGL_DIR)/src/font/lv_font_unscii_8.c \
+            $(LVGL_DIR)/src/core/lv_display.c \
+            $(LVGL_DIR)/src/core/lv_obj.c \
+            $(LVGL_DIR)/src/widgets/lv_textarea.c \
+            $(LVGL_DIR)/src/widgets/lv_label.c \
+            $(LVGL_DIR)/src/draw/lv_draw.c
+
 STARTUP := $(HAL_DIR)/startup.S
 LD_SCRIPT := $(HAL_DIR)/linker.ld
 
@@ -102,6 +117,13 @@ endif
 
 APP_SRC += $(EXTRA_APP_SRCS)
 
+# If the graphical-shell app is being built, include LVGL and display HAL.
+ifeq ($(findstring app_graphical_shell.c,$(EXTRA_APP_SRCS)),app_graphical_shell.c)
+HAL_SRC += $(GFX_HAL_SRC)
+APP_SRC += $(LVGL_SRC)
+CFLAGS_EXTRA += -DENABLE_GRAPHICAL_SHELL=1
+endif
+
 INCLUDES := -I$(ROOT_DIR)/include \
             -I$(HAL_DIR) \
             -I$(LIBTTAK_DIR)/include \
@@ -111,6 +133,7 @@ INCLUDES := -I$(ROOT_DIR)/include \
             -I$(ROOT_DIR)/tools/saramos_vi \
             -I$(ROOT_DIR)/tools/coreutils \
             -I$(ROOT_DIR)/tools/shell \
+            -I$(LVGL_DIR) \
             -I.
 
 CROSS_CC := $(BOARD_CC)

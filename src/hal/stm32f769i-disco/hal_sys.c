@@ -12,8 +12,8 @@
 #define SYSTICK_TICKINT (1U << 1)
 #define SYSTICK_CLKSOURCE (1U << 2)
 
-/* System clock is HSI 16 MHz. */
-#define SYSCLK_HZ       16000000U
+/* System clock: 168 MHz from the 25 MHz HSE crystal via PLL. */
+#define SYSCLK_HZ       168000000U
 #define SYSTICK_RELOAD  ((SYSCLK_HZ / 1000U) - 1U)
 
 extern volatile uint32_t saramos_tick_ms;
@@ -36,6 +36,84 @@ static inline void isb_barrier(void)
     __asm volatile ("isb" ::: "memory");
 }
 
+/* PWR registers needed for high-speed operation. */
+#define PWR_BASE        0x40007000U
+#define PWR_CR1         (*(volatile uint32_t *)(PWR_BASE + 0x00U))
+#define PWR_CSR1        (*(volatile uint32_t *)(PWR_BASE + 0x04U))
+#define PWR_CR1_VOS_Pos     14U
+#define PWR_CR1_VOS_SCALE1  (3U << PWR_CR1_VOS_Pos)
+#define PWR_CSR1_VOSRDY     (1U << 14U)
+
+#define RCC_APB1ENR_PWREN   (1U << 28U)
+
+/* Flash registers. */
+#define FLASH_BASE_REG  0x40023C00U
+#define FLASH_ACR       (*(volatile uint32_t *)(FLASH_BASE_REG + 0x00U))
+#define FLASH_ACR_LATENCY_Pos   0U
+#define FLASH_ACR_LATENCY_Msk   0xFU
+#define FLASH_ACR_PRFTEN        (1U << 8)
+#define FLASH_ACR_ARTEN         (1U << 9)
+
+static void enable_hse(void)
+{
+    RCC_CR |= (1U << 16); /* HSEON */
+    uint32_t timeout = 100000U;
+    while (!(RCC_CR & (1U << 17))) { /* HSERDY */
+        if (--timeout == 0U)
+            break;
+    }
+}
+
+static void set_sysclk_pll(void)
+{
+    /* Enable PWR clock and select voltage regulator scale 1 for 168 MHz. */
+    RCC_APB1ENR |= RCC_APB1ENR_PWREN;
+    (void)RCC_APB1ENR;
+    PWR_CR1 |= PWR_CR1_VOS_SCALE1;
+    /* Wait a short time for the regulator scaling to settle; some revisions
+     * do not assert VOSRDY immediately after a fresh reset.
+     */
+    for (volatile uint32_t i = 0; i < 10000U; i++)
+        ;
+
+    /* Set flash latency to 6 WS and enable ART prefetch (required at 168 MHz). */
+    FLASH_ACR &= ~FLASH_ACR_LATENCY_Msk;
+    FLASH_ACR |= 6U;
+    FLASH_ACR |= FLASH_ACR_PRFTEN | FLASH_ACR_ARTEN;
+    while ((FLASH_ACR & FLASH_ACR_LATENCY_Msk) != 6U)
+        ;
+
+    /* Configure PLL: HSE(25 MHz) / 25 * 336 / 2 = 168 MHz. */
+    RCC_PLLCFGR = (25U << 0)   |  /* PLLM = 25  */
+                  (336U << 6)  |  /* PLLN = 336 */
+                  (0U << 16)   |  /* PLLP = 2   */
+                  (1U << 22)   |  /* PLLSRC = HSE */
+                  (7U << 24);     /* PLLQ = 7   */
+
+    RCC_CR |= (1U << 24); /* PLLON */
+    uint32_t timeout = 100000U;
+    while (!(RCC_CR & (1U << 25))) { /* PLLRDY */
+        if (--timeout == 0U)
+            break;
+    }
+
+    /* Bus prescalers: AHB=1, APB1=/4 (42 MHz), APB2=/2 (84 MHz). */
+    uint32_t cfgr = RCC_CFGR;
+    cfgr &= ~0xFFFFU;
+    cfgr |= (0U << 4)   | /* HPRE  /1  */
+            (5U << 10)  | /* PPRE1 /4  */
+            (4U << 13);   /* PPRE2 /2  */
+    RCC_CFGR = cfgr;
+
+    /* Switch system clock to PLL. */
+    cfgr = RCC_CFGR;
+    cfgr &= ~3U;
+    cfgr |= 2U; /* SW = PLL */
+    RCC_CFGR = cfgr;
+    while ((RCC_CFGR & 0xCU) != (2U << 2))
+        ;
+}
+
 void hal_system_init(void)
 {
     /* Enable I-Cache and D-Cache for Cortex-M7.
@@ -46,18 +124,15 @@ void hal_system_init(void)
 
     /* Caches are kept disabled until an MPU region table is added to
      * separate Normal (SRAM/flash) and Device (peripheral) memory types.
-     * Enabling D-cache without MPU on Cortex-M7 causes bus faults. */
+     * Enabling D-cache without MPU on Cortex-M7 causes bus faults.
+     */
     (void)SCB_CCR;
 
     dsb_barrier();
     isb_barrier();
 
-    /* Set FLASH latency for 16 MHz (0 wait states is enough) */
-    FLASH_ACR &= ~0xFU;
-    FLASH_ACR |= 0U; /* 0 WS */
-
-    /* Keep HSI as system clock (default after reset) */
-    /* No PLL setup needed for minimal bring-up */
+    enable_hse();
+    set_sysclk_pll();
 }
 
 void scb_inv_dcache(void *addr, uint32_t len)

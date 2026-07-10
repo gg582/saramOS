@@ -1,0 +1,45 @@
+/*
+ * HAL display initialization for STM32F769I-DISCO.
+ *
+ * The on-board MIPI DSI LCD is an OTM8009A panel mounted in landscape mode:
+ *   - Active area: 800 x 480 pixels
+ *   - Pixel format used by the LVGL port: RGB565
+ *   - Framebuffer lives in the external SDRAM at 0xC0000000
+ */
+#ifndef HAL_DISPLAY_H
+#define HAL_DISPLAY_H
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define DISPLAY_WIDTH       800U
+#define DISPLAY_HEIGHT      480U
+#define DISPLAY_BPP         2U   /* RGB565 */
+#define DISPLAY_FB_SIZE     ((uint32_t)DISPLAY_WIDTH * DISPLAY_HEIGHT * DISPLAY_BPP)
+
+/* Backlight GPIO: PI14 on STM32F769I-DISCO */
+#define DISP_BACKLIGHT_PORT GPIOI_BASE
+#define DISP_BACKLIGHT_PIN  14U
+
+/* LCD reset GPIO: PJ15 */
+#define DISP_RESET_PORT     GPIOJ_BASE
+#define DISP_RESET_PIN      15U
+
+/* Initialize DSI + LTDC + OTM8009A and turn on backlight. */
+void hal_display_init(void);
+
+/* Return the configured framebuffer address (in SDRAM). */
+uint32_t hal_display_fb_addr(void);
+
+/* Turn backlight on/off. */
+void hal_display_backlight_on(void);
+void hal_display_backlight_off(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* HAL_DISPLAY_H */
