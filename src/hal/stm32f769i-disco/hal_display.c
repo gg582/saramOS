@@ -876,9 +876,31 @@ static int dsi_host_init(void)
      * initialization and switched to video mode afterwards.
      */
 
-    /* Automatic clock lane control + D-PHY clock control. */
+    /* D-PHY clock control enabled, but Automatic Clock lane Control
+     * (ACR) LEFT OFF -- i.e. CONTINUOUS clock, not non-continuous.
+     *
+     * Found by reading the devicetree all the way through: Zephyr's DSI
+     * host binding has a "non-continuous" boolean property
+     * (dsi_stm32.c maps it straight to AutomaticClockLaneControl /
+     * DSI_CLCR.ACR), and neither
+     * boards/shields/st_b_lcd40_dsi1_mb1166/boards/stm32f769i_disco.overlay
+     * nor the shield's own overlay set it for this exact panel -- a
+     * devicetree boolean property that is absent is false, so Zephyr's
+     * actual verified-working configuration runs the clock lane
+     * CONTINUOUSLY (always HS, never toggling to LP between
+     * transmissions) rather than switching it to LP automatically
+     * between HS bursts. This driver had ACR enabled (non-continuous),
+     * which was never checked against anything before now. Continuous
+     * clock gives the panel's D-PHY receiver a stable, always-present HS
+     * clock to stay locked to, instead of having to re-lock every time
+     * the clock lane comes back from LP; with dozens of LP command
+     * insertions and blanking-period transitions throughout every
+     * frame's video stream, needing to re-lock that often is a plausible
+     * source of exactly this driver's symptom (intermittent/degrading
+     * video content while the LP-only command link stays perfectly
+     * healthy in both directions). */
     DSI->CLCR &= ~(DSI_CLCR_DPCC_Msk | DSI_CLCR_ACR_Msk);
-    DSI->CLCR |= DSI_CLCR_DPCC_Msk | DSI_CLCR_ACR_Msk;
+    DSI->CLCR |= DSI_CLCR_DPCC_Msk;
 
     /* Flow control: BTA enabled so commands can be acknowledged. */
     DSI->PCR |= DSI_FLOW_CONTROL_BTAE;
@@ -963,24 +985,22 @@ static int dsi_video_mode_init(void)
 
     /* Low-power command settings.
      *
-     * LPSIZE/VLPSIZE are not arbitrary: per AN4860 ("LP command packet
-     * size"), they must be calculated from the actual line/porch timing,
-     * or the DSI host either violates video timing (too high) or keeps
-     * deferring pending commands to the last line of the frame (too low)
-     * -- for our exact timing (tL=31.72us line time, tHACT=19.2us in
-     * burst mode at 3 bytes/pixel), AN4860's formulas give LPSIZE~=28.9
-     * and VLPSIZE~=8.9. The previous hardcoded LPSIZE=16/VLPSIZE=0 left
-     * VLPSIZE at zero -- meaning essentially no command fits during the
-     * active-video (VACT) region at all -- which is why sending the ~80
-     * OTM8009A commands as LP-during-video took anywhere from under a
-     * second to nearly ten seconds, run to run (each one repeatedly
-     * deferred to the frame's last line until it could go out). */
+     * LPSIZE/VLPSIZE previously set to 28/8, derived from AN4860's ("LP
+     * command packet size") formulas for this exact line/porch timing.
+     * That calculation was never actually checked against a working
+     * reference, though -- reading Zephyr's dsi_stm32.c devicetree
+     * handling all the way through shows its "largest-packet-size"
+     * property (which sets BOTH LPLargestPacketSize/LPSIZE and
+     * LPVACTLargestPacketSize/VLPSIZE to the same value) defaults to 4
+     * when absent, via DT_INST_PROP_OR(..., 4) -- and this exact
+     * board+panel's devicetree does not set it, so the actual
+     * verified-working value is 4/4, not a formula-derived 28/8. */
     DSI->VMCR &= ~DSI_VMCR_LPCE_Msk;
     DSI->VMCR |= DSI_LP_COMMAND_ENABLE;
 
     DSI->LPMCR &= ~(DSI_LPMCR_LPSIZE_Msk | DSI_LPMCR_VLPSIZE_Msk);
-    DSI->LPMCR |= (28U << DSI_LPMCR_LPSIZE_Pos);
-    DSI->LPMCR |= (8U << DSI_LPMCR_VLPSIZE_Pos);
+    DSI->LPMCR |= (4U << DSI_LPMCR_LPSIZE_Pos);
+    DSI->LPMCR |= (4U << DSI_LPMCR_VLPSIZE_Pos);
 
     DSI->VMCR |= DSI_VMCR_LPHFPE_Msk |
                  DSI_VMCR_LPHBPE_Msk |
@@ -988,7 +1008,15 @@ static int dsi_video_mode_init(void)
                  DSI_VMCR_LPVFPE_Msk |
                  DSI_VMCR_LPVBPE_Msk |
                  DSI_VMCR_LPVSAE_Msk;
-    DSI->VMCR &= ~DSI_VMCR_FBTAAE_Msk;
+    /* Frame BTA (bus turn-around) acknowledge: this driver had it
+     * disabled, matching a generic AN4860 example (DSI_FBTAA_DISABLE),
+     * but Zephyr's dsi_stm32.c maps its "bta-ack-disable" boolean
+     * property straight to this bit (present -> disabled, absent ->
+     * DSI_FBTAA_ENABLE) and this exact board+panel's devicetree does not
+     * set it -- i.e. the verified-working config has it ENABLED, giving
+     * the host an active per-frame confirmation that the panel actually
+     * received each video frame instead of transmitting blind. */
+    DSI->VMCR |= DSI_VMCR_FBTAAE_Msk;
 
     hal_uart_puts("[DSI] video mode done\r\n");
     return 0;
