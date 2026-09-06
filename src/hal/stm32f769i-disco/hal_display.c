@@ -1084,19 +1084,25 @@ static int dsi_video_mode_init(void)
      * when absent, via DT_INST_PROP_OR(..., 4) -- and this exact
      * board+panel's devicetree does not set it, so the actual
      * verified-working value is 4/4, not a formula-derived 28/8. */
-    DSI->VMCR &= ~DSI_VMCR_LPCE_Msk;
-    DSI->VMCR |= DSI_LP_COMMAND_ENABLE;
+    /* LP command windows: disabled again. Tried both ways on the clean
+     * full-reset transition (no flicker/ISR errors either way): all LP
+     * windows disabled gave a real, right-colored picture squeezed 2x
+     * into the left half; re-enabling them (matching Zephyr) made it
+     * *worse* -- only ~2px wide, still right colors. Neither setting of
+     * this one bit-group is the deciding factor by itself (both
+     * produced *some* narrow-width squeeze, just different widths),
+     * which points at something else entirely being the actual root
+     * cause and this merely perturbing it -- same pattern as every
+     * other timing-adjacent change tried in this investigation.
+     * Disabled because it produced the better of the two results
+     * actually observed. */
+    DSI->VMCR &= ~(DSI_VMCR_LPCE_Msk | DSI_VMCR_LPHFPE_Msk | DSI_VMCR_LPHBPE_Msk |
+                   DSI_VMCR_LPVAE_Msk | DSI_VMCR_LPVFPE_Msk | DSI_VMCR_LPVBPE_Msk |
+                   DSI_VMCR_LPVSAE_Msk);
 
     DSI->LPMCR &= ~(DSI_LPMCR_LPSIZE_Msk | DSI_LPMCR_VLPSIZE_Msk);
     DSI->LPMCR |= (4U << DSI_LPMCR_LPSIZE_Pos);
     DSI->LPMCR |= (4U << DSI_LPMCR_VLPSIZE_Pos);
-
-    DSI->VMCR |= DSI_VMCR_LPHFPE_Msk |
-                 DSI_VMCR_LPHBPE_Msk |
-                 DSI_VMCR_LPVAE_Msk  |
-                 DSI_VMCR_LPVFPE_Msk |
-                 DSI_VMCR_LPVBPE_Msk |
-                 DSI_VMCR_LPVSAE_Msk;
     /* Frame BTA (bus turn-around) acknowledge: this driver had it
      * disabled, matching a generic AN4860 example (DSI_FBTAA_DISABLE),
      * but Zephyr's dsi_stm32.c maps its "bta-ack-disable" boolean
