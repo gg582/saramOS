@@ -819,7 +819,16 @@ static int dsi_host_init(void)
         }
     }
 
-    /* Configure DSI PLL: 25 MHz / 5 * 100 / 1 = 500 MHz -> byte clock 62.5 MHz. */
+    /* Tried halving this (ODF 0 -> 1, 500 -> 250 Mbps/lane) to test
+     * whether the continuous high-speed video path had a signal-margin
+     * problem the low-power command path (proven robust, including
+     * reads -- see hal_display_read_power_mode()) couldn't reveal.
+     * Measured result: no improvement -- if anything the on-screen
+     * picture was reported as visible for an even shorter moment before
+     * fading, not longer. Reverted to the reference 500 Mbps/lane value
+     * (matches the ST BSP, AN4860, and Zephyr's own driver for this
+     * exact panel) since deviating from it wasn't shown to help and
+     * removes a verified-correct baseline for no benefit. */
     DSI->WRPCR &= ~(DSI_WRPCR_PLL_NDIV_Msk | DSI_WRPCR_PLL_IDF_Msk | DSI_WRPCR_PLL_ODF_Msk);
     DSI->WRPCR |= (100U << DSI_WRPCR_PLL_NDIV_Pos) |
                   (5U   << DSI_WRPCR_PLL_IDF_Pos)  |
