@@ -1,6 +1,7 @@
 /*
  * HAL SDRAM initialization for STM32F769I-DISCO.
- * IS42S32400F on FMC SDRAM Bank 2 (0xD0000000, 16 MB).
+ * IS42S32400F (or equivalent MT48LC4M32B2) on FMC SDRAM Bank 1
+ * (0xC0000000, 16 MB).
  */
 #ifndef HAL_SDRAM_H
 #define HAL_SDRAM_H
@@ -16,6 +17,7 @@ extern "C" {
 
 /* FMC/SDRAM controller registers */
 #define FMC_BASE            0xA0000000U
+#define FMC_BCR1            (*(volatile uint32_t *)(FMC_BASE + 0x000U))
 #define FMC_SDCR1           (*(volatile uint32_t *)(FMC_BASE + 0x140U))
 #define FMC_SDCR2           (*(volatile uint32_t *)(FMC_BASE + 0x144U))
 #define FMC_SDTR1           (*(volatile uint32_t *)(FMC_BASE + 0x148U))

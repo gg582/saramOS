@@ -8,7 +8,9 @@
 #include "lvgl_port.h"
 #include "hal_sdram.h"
 #include "hal_display.h"
+#include <hal/board.h>
 #include <string.h>
+#include <stdio.h>
 
 extern void hal_uart_puts(const char *s);
 
@@ -21,7 +23,9 @@ extern void hal_uart_puts(const char *s);
 #define FONT_HEIGHT 8
 #define FONT_WIDTH  8
 
-static const uint8_t g_font[FONT_COUNT * FONT_HEIGHT] = {
+/* Keep the font in RAM so a flash-read timing/alignment issue cannot
+ * corrupt the glyphs seen by the renderer. */
+static uint8_t g_font[FONT_COUNT * FONT_HEIGHT] = {
     /* space */ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
     /* ! */     0x18,0x18,0x18,0x18,0x18,0x00,0x18,0x00,
     /* " */     0x66,0x66,0x66,0x00,0x00,0x00,0x00,0x00,
@@ -123,12 +127,26 @@ static const uint8_t g_font[FONT_COUNT * FONT_HEIGHT] = {
 #define ROWS    (DISPLAY_HEIGHT / FONT_HEIGHT)
 
 #define RGB565_BLACK 0x0000U
+#define RGB565_WHITE 0xFFFFU
 #define RGB565_GREEN 0x07E0U
 
 static volatile uint16_t *g_fb = NULL;
+
+/* Write two adjacent RGB565 pixels as one 32-bit word so the 32-bit SDRAM
+ * bus gets a clean write instead of a possibly-broken halfword write. */
+static inline void fb_write32(uint32_t x, uint32_t y, uint16_t c0, uint16_t c1)
+{
+    volatile uint32_t *p = (volatile uint32_t *)&g_fb[y * DISPLAY_WIDTH + x];
+    *p = ((uint32_t)c1 << 16) | c0;
+}
+
+static inline uint32_t fb_word_count(uint32_t pixels)
+{
+    return pixels / 2U;
+}
 static uint32_t g_cursor_col = 0;
 static uint32_t g_cursor_row = 0;
-static uint16_t g_fg = RGB565_GREEN;
+static uint16_t g_fg = RGB565_WHITE;
 static uint16_t g_bg = RGB565_BLACK;
 
 static inline void irq_disable(void)
@@ -139,6 +157,11 @@ static inline void irq_disable(void)
 static inline void irq_enable(void)
 {
     __asm volatile ("cpsie i" ::: "memory");
+}
+
+static inline void dsb(void)
+{
+    __asm volatile ("dsb" ::: "memory");
 }
 
 static void draw_glyph(uint32_t col, uint32_t row, char c)
@@ -157,6 +180,7 @@ static void draw_glyph(uint32_t col, uint32_t row, char c)
             g_fb[(y0 + y) * DISPLAY_WIDTH + (x0 + x)] = color;
         }
     }
+    dsb();
 }
 
 static void clear_row(uint32_t row)
@@ -167,6 +191,7 @@ static void clear_row(uint32_t row)
             g_fb[(y0 + y) * DISPLAY_WIDTH + x] = g_bg;
         }
     }
+    dsb();
 }
 
 static void scroll_up(void)
@@ -174,6 +199,7 @@ static void scroll_up(void)
     uint32_t row_bytes = DISPLAY_WIDTH * FONT_HEIGHT * DISPLAY_BPP;
     uint8_t *fb = (uint8_t *)g_fb;
     memmove(fb, fb + row_bytes, (ROWS - 1) * row_bytes);
+    dsb();
     clear_row(ROWS - 1);
 }
 
@@ -237,8 +263,16 @@ static void console_init(void)
     g_fb = (volatile uint16_t *)hal_display_fb_addr();
     for (uint32_t i = 0; i < DISPLAY_WIDTH * DISPLAY_HEIGHT; i++)
         g_fb[i] = g_bg;
+    dsb();
+
     g_cursor_col = 0;
     g_cursor_row = 0;
+
+    /* Diagnostic text visible immediately after init, before any UART hook. */
+    const char *test = "TEST FONT";
+    while (*test)
+        gfx_console_putc(*test++);
+    dsb();
 }
 
 void lvgl_port_init(void)

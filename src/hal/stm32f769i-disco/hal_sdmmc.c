@@ -20,8 +20,15 @@
 #include <stdio.h>
 #include <string.h>
 
-#define SDMMC_CLK_SLOW_DIV  20U   /* 16 MHz / (2*20) = 400 kHz */
-#define SDMMC_CLK_FAST_DIV  1U    /* 16 MHz / (2*1)  = 8 MHz  */
+/* SDMMC2's kernel clock is SYSCLK (SDMMC2SEL reset default = 0 = SYSCLK;
+ * nothing in this file selects PLL48CLK instead), which changed from
+ * 168 MHz to 216 MHz when hal_sys.c was updated to match Zephyr's SDRAM
+ * clock reference (216/168 = 1.2857x). Both divisors below are scaled up
+ * by that same factor (rounded so the actual clock does not exceed what
+ * it was before) so the slow/fast SDMMC_CK targets stay put despite the
+ * higher SYSCLK. */
+#define SDMMC_CLK_SLOW_DIV  26U   /* was 20 @ 168 MHz */
+#define SDMMC_CLK_FAST_DIV  2U    /* was 1 @ 168 MHz */
 
 #define SD_CMD_ERR_MASK     (SDMMC_STA_CCRCFAIL | SDMMC_STA_CTIMEOUT)
 #define SD_DATA_ERR_MASK    (SDMMC_STA_DCRCFAIL | SDMMC_STA_DTIMEOUT | \

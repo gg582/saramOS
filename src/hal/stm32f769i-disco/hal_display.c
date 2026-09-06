@@ -16,8 +16,18 @@
 #include <hal/board.h>
 #include <hal/hal_gpio.h>
 #include <string.h>
+#include <stdio.h>
 
 extern void hal_uart_puts(const char *s);
+
+/* Runtime DSI command trace: logs the actual GHCR/GPDR values as they are
+ * written, at the moment they are written, rather than what the calling
+ * source code appears to intend -- to catch a bug in dsi_short_write()/
+ * dsi_long_write() themselves that a source read-through could miss. */
+#define DSI_TRACE_ENABLE 1
+#if DSI_TRACE_ENABLE
+static uint32_t g_dsi_trace_seq;
+#endif
 
 /* --- Extra RCC definitions needed for the display clocks --- */
 #define RCC_PLLSAICFGR      (*(volatile uint32_t *)(RCC_BASE + 0x88U))
@@ -355,17 +365,18 @@ typedef struct {
 static uint32_t g_fb_addr = 0;
 
 /* -------------------------------------------------------------------------- */
-/* Minimal busy-wait delays (assumes 16 MHz HSI).                             */
+/* Minimal busy-wait delays, calibrated for the 216 MHz HCLK configured by
+ * hal_system_init() (was 168 MHz; scaled by 216/168 = 1.2857).             */
 /* -------------------------------------------------------------------------- */
 static void disp_delay_ms(uint32_t ms)
 {
-    for (volatile uint32_t i = 0; i < (168000U * ms); i++)
+    for (volatile uint32_t i = 0; i < (216000U * ms); i++)
         ;
 }
 
 static void disp_delay_us(uint32_t us)
 {
-    for (volatile uint32_t i = 0; i < (168U * us); i++)
+    for (volatile uint32_t i = 0; i < (216U * us); i++)
         ;
 }
 
@@ -429,28 +440,64 @@ static int dsi_wait_cmd_fifo_empty(void)
 
 static int dsi_short_write(uint8_t cmd, const uint8_t *param, uint8_t nparam)
 {
-    if (dsi_wait_cmd_fifo_empty() < 0)
+    if (dsi_wait_cmd_fifo_empty() < 0) {
+#if DSI_TRACE_ENABLE
+        char buf[48];
+        snprintf(buf, sizeof(buf), "SW#%lu FIFO-EMPTY-TIMEOUT\r\n",
+                 (unsigned long)g_dsi_trace_seq);
+        hal_uart_puts(buf);
+        g_dsi_trace_seq++;
+#endif
         return -1;
+    }
 
     uint8_t dt = (nparam == 0U) ? DSI_DCS_SHORT_WRITE0 : DSI_DCS_SHORT_WRITE1;
     uint32_t p = (nparam > 0U) ? param[0] : 0U;
-    DSI->GHCR = (dt << DSI_GHCR_DT_Pos) |
-                (0U << DSI_GHCR_VCID_Pos) |
-                ((uint32_t)cmd << DSI_GHCR_WCLSB_Pos) |
-                (p << DSI_GHCR_WCMSB_Pos);
+    uint32_t ghcr = (dt << DSI_GHCR_DT_Pos) |
+                    (0U << DSI_GHCR_VCID_Pos) |
+                    ((uint32_t)cmd << DSI_GHCR_WCLSB_Pos) |
+                    (p << DSI_GHCR_WCMSB_Pos);
+    DSI->GHCR = ghcr;
+#if DSI_TRACE_ENABLE
+    {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "SW#%lu dt=%02x cmd=%02x p=%02x ghcr=%08lx\r\n",
+                 (unsigned long)g_dsi_trace_seq, dt, cmd, (unsigned)p,
+                 (unsigned long)ghcr);
+        hal_uart_puts(buf);
+        g_dsi_trace_seq++;
+    }
+#endif
     return 0;
 }
 
 static int dsi_long_write(uint8_t cmd, const uint8_t *params, uint32_t nparams)
 {
-    if (dsi_wait_cmd_fifo_empty() < 0)
+    if (dsi_wait_cmd_fifo_empty() < 0) {
+#if DSI_TRACE_ENABLE
+        char buf[48];
+        snprintf(buf, sizeof(buf), "LW#%lu FIFO-EMPTY-TIMEOUT\r\n",
+                 (unsigned long)g_dsi_trace_seq);
+        hal_uart_puts(buf);
+        g_dsi_trace_seq++;
+#endif
         return -1;
+    }
+
+#if DSI_TRACE_ENABLE
+    uint32_t words[8];
+    uint32_t nwords = 0;
+#endif
 
     uint32_t first = cmd;
     uint32_t nb = (nparams < 3U) ? nparams : 3U;
     for (uint32_t i = 0; i < nb; i++)
         first |= ((uint32_t)params[i] << (8U + 8U * i));
     DSI->GPDR = first;
+#if DSI_TRACE_ENABLE
+    if (nwords < 8U)
+        words[nwords++] = first;
+#endif
 
     uint32_t remaining = nparams - nb;
     const uint8_t *p = params + nb;
@@ -460,14 +507,33 @@ static int dsi_long_write(uint8_t cmd, const uint8_t *params, uint32_t nparams)
         for (uint32_t i = 0; i < nb; i++)
             word |= ((uint32_t)p[i] << (8U * i));
         DSI->GPDR = word;
+#if DSI_TRACE_ENABLE
+        if (nwords < 8U)
+            words[nwords++] = word;
+#endif
         p += nb;
         remaining -= nb;
     }
 
-    DSI->GHCR = (DSI_DCS_LONG_WRITE << DSI_GHCR_DT_Pos) |
-                (0U << DSI_GHCR_VCID_Pos) |
-                (((nparams + 1U) & 0xFFU) << DSI_GHCR_WCLSB_Pos) |
-                ((((nparams + 1U) >> 8U) & 0xFFU) << DSI_GHCR_WCMSB_Pos);
+    uint32_t ghcr = (DSI_DCS_LONG_WRITE << DSI_GHCR_DT_Pos) |
+                    (0U << DSI_GHCR_VCID_Pos) |
+                    (((nparams + 1U) & 0xFFU) << DSI_GHCR_WCLSB_Pos) |
+                    ((((nparams + 1U) >> 8U) & 0xFFU) << DSI_GHCR_WCMSB_Pos);
+    DSI->GHCR = ghcr;
+#if DSI_TRACE_ENABLE
+    {
+        char buf[160];
+        int off = snprintf(buf, sizeof(buf), "LW#%lu cmd=%02x n=%lu ghcr=%08lx w=[",
+                            (unsigned long)g_dsi_trace_seq, cmd,
+                            (unsigned long)nparams, (unsigned long)ghcr);
+        for (uint32_t i = 0; i < nwords && off < (int)sizeof(buf) - 12; i++)
+            off += snprintf(buf + off, sizeof(buf) - (size_t)off, "%08lx ",
+                             (unsigned long)words[i]);
+        snprintf(buf + off, sizeof(buf) - (size_t)off, "]\r\n");
+        hal_uart_puts(buf);
+        g_dsi_trace_seq++;
+    }
+#endif
     return 0;
 }
 
@@ -970,7 +1036,19 @@ void hal_display_init(void)
      * longer stall. */
     if (dsi_video_mode_init() < 0)
         return;
-    dsi_phy_timers_init();
+    /* Deliberately NOT calling dsi_phy_timers_init() here: Zephyr's own
+     * STM32 DSI host driver (drivers/mipi_dsi/dsi_stm32.c) only calls
+     * HAL_DSI_ConfigPhyTimer() when the devicetree node has a
+     * "phy-timings" property, and the devicetree for this exact board +
+     * this exact OTM8009A panel (boards/shields/st_b_lcd40_dsi1_mb1166)
+     * does not set one -- meaning the real, verified-working
+     * configuration for this hardware leaves DSI_CLTCR/DSI_DLTCR at
+     * their power-on-reset values. This driver was instead copying the
+     * 0x14/0x0A values found in the ST BSP's *HDMI* bring-up path (the
+     * OTM8009A path in that same BSP file never calls
+     * HAL_DSI_ConfigPhyTimer either), which are almost certainly wrong
+     * for this panel's actual timing margins.
+     */
 
     hal_uart_puts("[DISP] ltdc init\r\n");
     ltdc_init(g_fb_addr);

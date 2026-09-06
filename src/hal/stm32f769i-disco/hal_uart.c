@@ -30,8 +30,10 @@ void hal_uart_init(void)
     GPIOA_AFRH &= ~((0xFU << ((9 - 8) * 4)) | (0xFU << ((10 - 8) * 4)));
     GPIOA_AFRH |= ((7U << ((9 - 8) * 4)) | (7U << ((10 - 8) * 4)));
 
-    /* Baudrate 115200 @ 84 MHz (APB2 = HCLK/2 = 168/2) -> 84000000/115200 = 729 */
-    USART1_BRR = 729;
+    /* Baudrate 115200 @ 108 MHz (APB2 = HCLK/2 = 216/2) -> 108000000/115200
+     * = 937.5, rounded to 938 (SYSCLK is now 216 MHz to match Zephyr's
+     * SDRAM timing reference -- see hal_sys.c). */
+    USART1_BRR = 938;
 
     /* Disable overrun detection so ORE never blocks new incoming bytes. */
     USART1_CR3 |= USART_CR3_OVRDIS;

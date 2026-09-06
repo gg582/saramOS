@@ -13,8 +13,14 @@
 #define SYSTICK_TICKINT (1U << 1)
 #define SYSTICK_CLKSOURCE (1U << 2)
 
-/* System clock: 168 MHz from the 25 MHz HSE crystal via PLL. */
-#define SYSCLK_HZ       168000000U
+/* System clock: 216 MHz from the 25 MHz HSE crystal via PLL, matching
+ * Zephyr's own configuration for this exact board (25 MHz HSE / 25 * 432 /
+ * 2 = 216 MHz), so that the SDRAM clock (SDCLK = HCLK/2 = 108 MHz) and its
+ * timing parameters can be taken directly from Zephyr's verified-working
+ * values instead of re-derived by unit conversion from a different base
+ * clock. STM32F76x/77x requires Over-drive mode above 180 MHz -- see
+ * set_sysclk_pll(). */
+#define SYSCLK_HZ       216000000U
 #define SYSTICK_RELOAD  ((SYSCLK_HZ / 1000U) - 1U)
 
 extern volatile uint32_t saramos_tick_ms;
@@ -55,6 +61,10 @@ static inline void isb_barrier(void)
 #define PWR_CR1_VOS_Pos     14U
 #define PWR_CR1_VOS_SCALE1  (3U << PWR_CR1_VOS_Pos)
 #define PWR_CSR1_VOSRDY     (1U << 14U)
+#define PWR_CR1_ODEN        (1U << 16U)
+#define PWR_CR1_ODSWEN      (1U << 17U)
+#define PWR_CSR1_ODRDY      (1U << 16U)
+#define PWR_CSR1_ODSWRDY    (1U << 17U)
 
 #define RCC_APB1ENR_PWREN   (1U << 28U)
 
@@ -108,7 +118,7 @@ static void mpu_init(void)
 
 static void set_sysclk_pll(void)
 {
-    /* Enable PWR clock and select voltage regulator scale 1 for 168 MHz. */
+    /* Enable PWR clock and select voltage regulator scale 1 for 216 MHz. */
     RCC_APB1ENR |= RCC_APB1ENR_PWREN;
     (void)RCC_APB1ENR;
     PWR_CR1 |= PWR_CR1_VOS_SCALE1;
@@ -118,19 +128,48 @@ static void set_sysclk_pll(void)
     for (volatile uint32_t i = 0; i < 10000U; i++)
         ;
 
-    /* Set flash latency to 6 WS and enable ART prefetch (required at 168 MHz). */
+    /* STM32F76x/77x requires Over-drive mode to run above 180 MHz. Enable
+     * it, then enable Over-drive switching, waiting for each ready flag
+     * (falls through on timeout rather than hanging forever if a revision
+     * doesn't assert the flag promptly, matching the VOSRDY wait above). */
+    PWR_CR1 |= PWR_CR1_ODEN;
+    {
+        uint32_t timeout = 100000U;
+        while (!(PWR_CSR1 & PWR_CSR1_ODRDY)) {
+            if (--timeout == 0U)
+                break;
+        }
+    }
+    PWR_CR1 |= PWR_CR1_ODSWEN;
+    {
+        uint32_t timeout = 100000U;
+        while (!(PWR_CSR1 & PWR_CSR1_ODSWRDY)) {
+            if (--timeout == 0U)
+                break;
+        }
+    }
+
+    /* Set flash latency to 7 WS and enable ART prefetch (required at
+     * 216 MHz, VOS Scale 1 + Over-drive). */
     FLASH_ACR &= ~FLASH_ACR_LATENCY_Msk;
-    FLASH_ACR |= 6U;
+    FLASH_ACR |= 7U;
     FLASH_ACR |= FLASH_ACR_PRFTEN | FLASH_ACR_ARTEN;
-    while ((FLASH_ACR & FLASH_ACR_LATENCY_Msk) != 6U)
+    while ((FLASH_ACR & FLASH_ACR_LATENCY_Msk) != 7U)
         ;
 
-    /* Configure PLL: HSE(25 MHz) / 25 * 336 / 2 = 168 MHz. */
+    /* Configure PLL: HSE(25 MHz) / 25 * 432 / 2 = 216 MHz. Matches
+     * Zephyr's own PLL config for this board (div-m=25, mul-n=432,
+     * div-p=2). */
     RCC_PLLCFGR = (25U << 0)   |  /* PLLM = 25  */
-                  (336U << 6)  |  /* PLLN = 336 */
+                  (432U << 6)  |  /* PLLN = 432 */
                   (0U << 16)   |  /* PLLP = 2   */
                   (1U << 22)   |  /* PLLSRC = HSE */
-                  (7U << 24);     /* PLLQ = 7   */
+                  (9U << 24);     /* PLLQ = 9 (matches Zephyr's div-q; keeps
+                                    * the 48 MHz USB/SDIO domain in spec:
+                                    * 216/9 = 24 MHz -- not exactly 48 MHz,
+                                    * but this driver doesn't use PLLQ's
+                                    * output for anything, so only PLLM/N/P
+                                    * (the SYSCLK path) actually matter here). */
 
     RCC_CR |= (1U << 24); /* PLLON */
     uint32_t timeout = 100000U;
@@ -139,7 +178,7 @@ static void set_sysclk_pll(void)
             break;
     }
 
-    /* Bus prescalers: AHB=1, APB1=/4 (42 MHz), APB2=/2 (84 MHz). */
+    /* Bus prescalers: AHB=1, APB1=/4 (54 MHz), APB2=/2 (108 MHz). */
     uint32_t cfgr = RCC_CFGR;
     cfgr &= ~0xFFFFU;
     cfgr |= (0U << 4)   | /* HPRE  /1  */
