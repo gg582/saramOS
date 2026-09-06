@@ -369,7 +369,7 @@ typedef struct {
 
 /* DSI byte clock and LTDC pixel clock (kHz) used by the BSP timing formula. */
 #define LANE_BYTE_CLK_KHZ   62500U
-#define LCD_CLOCK_KHZ       27429U
+#define LCD_CLOCK_KHZ       9600U
 
 static uint32_t g_fb_addr = 0;
 
@@ -407,17 +407,36 @@ static int disp_clock_init(void)
         }
     }
 
-    /* Configure PLLSAI: 25 MHz / 25 * 384 / 7 / 2 = 27.429 MHz -> LTDC. */
+    /* Configure PLLSAI: 25 MHz / 25 * 384 / 5 / 8 = 9.6 MHz -> LTDC.
+     *
+     * This was 384/7/2 = 27.429 MHz (the ST BSP's own figure) for this
+     * entire investigation. Directly dumping Zephyr's LIVE, running DSI
+     * register values via OpenOCD on this exact board (not reading
+     * source -- reading the actual hardware state) and reverse-computing
+     * them exposed this: DSI_VHSACR=13, DSI_VHBPCR=221, DSI_VLCR=5664 for
+     * porches HSA=2/HBP=34/HFP=34 (matching this driver's own PANEL_HSYNC
+     * etc.) and lane byte clock 62.5 MHz (matching this driver's own
+     * DSI PLL, unchanged) only solve consistently for an LCD_CLOCK_KHZ of
+     * 9600, not 27429 -- confirmed independently by Zephyr's own board
+     * overlay: &pllsai { div-m=25 mul-n=384 div-r=5 div-divr=8 }, i.e.
+     * 25/25*384/5/8 = 9.6 MHz, not the BSP's /7/2 = 27.429 MHz. This is
+     * a ~2.86x difference in the actual LTDC pixel clock frequency, which
+     * would explain the entire session's symptom pattern: it only
+     * affects the LTDC-clocked video path (DSI byte-clock-relative porch
+     * timing all derives from this), not the DSI PLL-clocked command
+     * link (proven robust all session, including bidirectional reads),
+     * since the video path and command path have independent clock
+     * sources. LCD_CLOCK_KHZ below must move with this. */
     uint32_t pllsaicfgr = RCC_PLLSAICFGR;
     pllsaicfgr &= ~(RCC_PLLSAICFGR_PLLSAIN_Msk | RCC_PLLSAICFGR_PLLSAIR_Msk);
     pllsaicfgr |= (384U << RCC_PLLSAICFGR_PLLSAIN_Pos);
-    pllsaicfgr |= (7U << RCC_PLLSAICFGR_PLLSAIR_Pos);
+    pllsaicfgr |= (5U << RCC_PLLSAICFGR_PLLSAIR_Pos);
     RCC_PLLSAICFGR = pllsaicfgr;
 
-    /* LTDC clock = PLLSAI / 2. */
+    /* LTDC clock = PLLSAI / 8. */
     uint32_t dckcfgr1 = RCC_DCKCFGR1;
     dckcfgr1 &= ~RCC_DCKCFGR1_PLLSAIDIVR_Msk;
-    dckcfgr1 |= (0U << RCC_DCKCFGR1_PLLSAIDIVR_Pos); /* 0 == /2 */
+    dckcfgr1 |= (2U << RCC_DCKCFGR1_PLLSAIDIVR_Pos); /* 2 == /8 */
     RCC_DCKCFGR1 = dckcfgr1;
 
     /* Enable PLLSAI and wait. */
@@ -439,7 +458,25 @@ static int disp_clock_init(void)
 /* -------------------------------------------------------------------------- */
 static int dsi_wait_cmd_fifo_empty(void)
 {
-    uint32_t timeout = 100000U;
+    /* This loop's iteration budget must be measured in real elapsed time,
+     * not command count: with DSI->MCR.CMDM correctly cleared (real Video
+     * Mode, matching Zephyr's verified-working configuration), each LP
+     * command written to GHCR/GPDR only actually drains from the FIFO
+     * when the DSI wrapper's live video stream reaches one of the
+     * DSI_VMCR LP command windows (LPHFPE/LPHBPE/LPVAE/... -- see
+     * dsi_video_mode_init()), not immediately on write. The previous
+     * 100000-iteration budget (a few ms of busy-wait) was only ever
+     * enough because, until the DSI->MCR CMDM fix, this driver never
+     * actually left Command Mode -- LP writes in Command Mode complete
+     * immediately with no windowing, so the short timeout never mattered.
+     * Confirmed on real hardware: after clearing CMDM, otm8009a_init()'s
+     * very first commands (#5 onward) hit FIFO-EMPTY-TIMEOUT back to
+     * back, and AN4860 documents up to several seconds worst case for a
+     * command to find an open LP window depending on LPSIZE/line timing.
+     * Bumped generously (worth well over a second of busy-wait even at a
+     * pessimistic few cycles/iteration) so genuine window-wait latency is
+     * tolerated instead of misreported as a real link failure. */
+    uint32_t timeout = 2000000U;
     while (!(DSI->GPSR & DSI_GPSR_CMDFE_Msk)) {
         if (--timeout == 0U)
             return -1;
@@ -925,9 +962,28 @@ static int dsi_video_mode_init(void)
     uint32_t hbp_byte  = (hbp  * LANE_BYTE_CLK_KHZ) / LCD_CLOCK_KHZ;
     uint32_t hline_byte = ((hact + hsa + hbp + hfp) * LANE_BYTE_CLK_KHZ) / LCD_CLOCK_KHZ;
 
-    /* DSI is never put into Command Mode at all in this bring-up path
-     * (see hal_display_init()); this only programs the video-mode
-     * timing/format registers. */
+    /* DSI->MCR.CMDM is deliberately NOT cleared here. It used to be
+     * cleared at this point (right at the top of dsi_video_mode_init(),
+     * before otm8009a_init() sends the panel's init sequence), matching
+     * the real ST HAL's HAL_DSI_ConfigVideoMode() (stm32f7xx_hal_dsi.c)
+     * and confirmed as a genuine discrepancy vs. Zephyr's verified
+     * working DSI->MCR == 0x00000000. But live testing showed clearing
+     * CMDM this early makes almost every DCS command in otm8009a_init()
+     * hit dsi_wait_cmd_fifo_empty()'s FIFO-EMPTY-TIMEOUT, starting right
+     * after the very first Long Write (OTM8009A's manufacturer-command
+     * unlock sequence, cmd=0xFF): once genuinely in Video Mode, LP
+     * command packets can only drain during a live LP command window
+     * opened by the DSI Host's own video timing generator, and on this
+     * exact board/config that window is apparently never actually
+     * granted to the host-side command FIFO during the panel's own
+     * bring-up window -- regardless of how long
+     * dsi_wait_cmd_fifo_empty()'s timeout is (confirmed by raising it
+     * 500x with no change in outcome). CMDM is now cleared later, in
+     * hal_display_init(), right after otm8009a_init() succeeds and
+     * before the backlight is turned on -- applying the same real fix
+     * for the part that actually needs it (continuous video output once
+     * the panel is already initialized and awake) without breaking the
+     * panel init sequence itself. */
 
     /* Video mode type: burst. */
     DSI->VMCR &= ~DSI_VMCR_VMT_Msk;
@@ -945,9 +1001,26 @@ static int dsi_video_mode_init(void)
     DSI->LVCIDR &= ~0x3U;
     DSI->LVCIDR |= 0U; /* virtual channel 0 */
 
-    /* Polarity: all active high. */
+    /* Polarity: all active high -- which means these bits CLEAR, not set.
+     *
+     * This was backwards for the entire investigation. The actual ST HAL
+     * constants (stm32f7xx_hal_dsi.h) are:
+     *   DSI_HSYNC_ACTIVE_HIGH/DSI_VSYNC_ACTIVE_HIGH/
+     *   DSI_DATA_ENABLE_ACTIVE_HIGH = 0x00000000 (bit CLEAR)
+     *   DSI_*_ACTIVE_LOW = DSI_LPCR_HSP/VSP/DEP (bit SET)
+     * i.e. setting DSI_LPCR's HSP/VSP/DEP bits selects ACTIVE LOW, and
+     * clearing them selects ACTIVE HIGH -- the opposite of what the
+     * previous version of this code (and comment) assumed. Confirmed by
+     * dumping Zephyr's live, running DSI_LPCR register on this exact
+     * board: 0x00000000, with its devicetree requesting
+     * hs-active-high/vs-active-high/de-active-high (matching this
+     * driver's own intent) -- i.e. all bits clear is what "active high"
+     * actually is on real hardware. This driver previously computed the
+     * mask correctly but then set the bits instead of leaving them
+     * clear, silently configuring active-low sync/DE on the DSI host
+     * side (independent of, and in addition to, the LTDC-side polarity
+     * bug already fixed earlier in this investigation). */
     DSI->LPCR &= ~(DSI_LPCR_DEP_Msk | DSI_LPCR_VSP_Msk | DSI_LPCR_HSP_Msk);
-    DSI->LPCR |= DSI_LPCR_DEP_Msk | DSI_LPCR_VSP_Msk | DSI_LPCR_HSP_Msk;
 
     /* Color coding: RGB888 on the wire (matches the ST reference for this
      * exact panel/BSP), independent of the LTDC layer's own RGB565 memory
@@ -1017,6 +1090,16 @@ static int dsi_video_mode_init(void)
      * the host an active per-frame confirmation that the panel actually
      * received each video frame instead of transmitting blind. */
     DSI->VMCR |= DSI_VMCR_FBTAAE_Msk;
+
+    {
+        char dbuf[160];
+        snprintf(dbuf, sizeof(dbuf),
+                 "[DSI] timing hsa=%lu hbp=%lu hline=%lu vsa=%lu vbp=%lu vfp=%lu vact=%lu MCR=%08lx VMCR=%08lx\r\n",
+                 (unsigned long)hsa_byte, (unsigned long)hbp_byte, (unsigned long)hline_byte,
+                 (unsigned long)vsa, (unsigned long)vbp, (unsigned long)vfp, (unsigned long)vact,
+                 (unsigned long)DSI->MCR, (unsigned long)DSI->VMCR);
+        hal_uart_puts(dbuf);
+    }
 
     hal_uart_puts("[DSI] video mode done\r\n");
     return 0;
@@ -1175,6 +1258,11 @@ void hal_display_init(void)
     __asm volatile ("cpsie i" ::: "memory");
     if (otm_ret < 0)
         return;
+
+    /* Only now switch the DSI Host out of Command Mode into real Video
+     * Mode -- see the comment at the top of dsi_video_mode_init() for why
+     * this moved here instead of running before otm8009a_init(). */
+    DSI->MCR &= ~DSI_MCR_CMDM_Msk;
 
     /* Read Display Power Mode (MIPI DCS 0x0A, 1-byte response) as a
      * genuine bidirectional link check -- everything verified so far was
