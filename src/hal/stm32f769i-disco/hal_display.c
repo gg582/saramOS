@@ -1059,7 +1059,22 @@ void hal_display_init(void)
     DSI->WCR |= DSI_WCR_DSIEN_Msk;
 
     hal_uart_puts("[DISP] sending OTM init\r\n");
-    if (otm8009a_init() < 0)
+    /* Test: saramOS runs a 1ms SysTick with interrupts globally enabled
+     * during this ~100-command sequence, unlike a proper RTOS with
+     * defined interrupt priorities (Zephyr). If SysTick preempts at a
+     * moment sensitive to DSI's own protocol timing (e.g. between
+     * dsi_wait_cmd_fifo_empty() returning and the GHCR/GPDR write that
+     * follows), a few microseconds of jitter could be enough to violate
+     * a margin none of the register-level comparisons so far could
+     * detect. Disabling interrupts for the whole call isolates whether
+     * that jitter is a factor; disp_delay_ms()/_us() are plain busy-wait
+     * loops (not SysTick-driven), so the two explicit delays inside
+     * otm8009a_init() (10ms x2, 120ms) still work correctly with
+     * interrupts off, just without yielding to anything else meanwhile. */
+    __asm volatile ("cpsid i" ::: "memory");
+    int otm_ret = otm8009a_init();
+    __asm volatile ("cpsie i" ::: "memory");
+    if (otm_ret < 0)
         return;
 
     hal_display_backlight_on();
