@@ -30,20 +30,40 @@ static void obj_free(lv_obj_t *obj)
     }
 }
 
+/* lv_style_get_prop() can't tell "no entry for this prop" apart from "an
+ * entry exists whose value happens to be the all-zero bit pattern" -- its
+ * return type is the value itself, with no separate found/not-found
+ * signal. That is indistinguishable for a style_num() of exactly 0 (only
+ * papered over for X/Y/WIDTH/HEIGHT by special-casing those four props
+ * below) and, worse, for style_color(): lv_color_make(0,0,0) (pure black)
+ * has .full == 0, so a black bg/text color set via
+ * lv_obj_set_style_bg_color()/_text_color() was silently discarded in
+ * favor of the caller's default every time -- e.g. a black label
+ * background over white text (or vice versa) never actually applied,
+ * leaving both drawn in the same fallback color and the text invisible.
+ * Do the "was it actually set" check directly against the style's entry
+ * list instead of the ambiguous return value. */
+static bool style_has_prop(const lv_style_t *style, lv_style_prop_t prop)
+{
+    for (uint8_t i = 0; i < style->cnt; i++) {
+        if (style->entries[i].prop == prop)
+            return true;
+    }
+    return false;
+}
+
 static lv_coord_t style_num(const lv_obj_t *obj, lv_style_prop_t prop, lv_coord_t def)
 {
-    lv_style_value_t v = lv_style_get_prop(&obj->style, prop);
-    if (v.num != 0 || prop == LV_STYLE_PROP_X || prop == LV_STYLE_PROP_Y ||
-        prop == LV_STYLE_PROP_WIDTH || prop == LV_STYLE_PROP_HEIGHT)
-        return v.num;
-    return def;
+    if (!style_has_prop(&obj->style, prop))
+        return def;
+    return lv_style_get_prop(&obj->style, prop).num;
 }
 
 static lv_color_t style_color(const lv_obj_t *obj, lv_style_prop_t prop, lv_color_t def)
 {
-    lv_style_value_t v = lv_style_get_prop(&obj->style, prop);
-    if (v.color.full != 0) return v.color;
-    return def;
+    if (!style_has_prop(&obj->style, prop))
+        return def;
+    return lv_style_get_prop(&obj->style, prop).color;
 }
 
 static const lv_font_t *style_font(const lv_obj_t *obj)

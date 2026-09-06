@@ -1,9 +1,14 @@
 /*
  * Display/console port for STM32F769I-DISCO graphical shell.
  *
- * This replaces the LVGL rendering path with a simple 8x8 bitmap console that
- * writes directly into the LTDC framebuffer in SDRAM.  The LTDC scans the same
- * memory, so no explicit flush is required.
+ * Unlike the earlier version of this file, the on-screen console is now
+ * actually driven through LVGL (the vendored, minimal LVGL v9 API-compatible
+ * implementation in third_party/lvgl) instead of a hand-rolled font blitter:
+ * a single full-screen lv_label object holds the console text, and LVGL's
+ * own software rasterizer draws it. The label's render buffer *is* the real
+ * LTDC/DSI framebuffer in SDRAM (LV_DISPLAY_RENDER_MODE_DIRECT), so nothing
+ * extra needs to be copied out -- the LTDC scans the same memory LVGL just
+ * rendered into.
  */
 #include "lvgl_port.h"
 #include "hal_sdram.h"
@@ -11,143 +16,29 @@
 #include <hal/board.h>
 #include <string.h>
 #include <stdio.h>
+#include "lvgl.h"
 
 extern void hal_uart_puts(const char *s);
 
 /* --------------------------------------------------------------------------
- * 8x8 monospace font (ASCII 32..126), derived from the public-domain
- * unscii-8 font.  Each glyph is 8 bytes, one bit per pixel.
+ * Console text buffer: a fixed grid of rows/cols (matching the on-screen
+ * 8x8-font layout), rebuilt into one newline-joined string and handed to
+ * the LVGL label only when something actually changed. LVGL's own
+ * lv_draw_label() understands '\n' as a line break, so building the joined
+ * string here is enough to get the same wrap/scroll behavior the old
+ * per-pixel blitter had.
  * -------------------------------------------------------------------------- */
-#define FONT_FIRST  32
-#define FONT_COUNT  95
-#define FONT_HEIGHT 8
-#define FONT_WIDTH  8
+#define CONSOLE_FONT_WIDTH  8U
+#define CONSOLE_FONT_HEIGHT 8U
+#define COLS    (DISPLAY_WIDTH  / CONSOLE_FONT_WIDTH)
+#define ROWS    (DISPLAY_HEIGHT / CONSOLE_FONT_HEIGHT)
 
-/* Keep the font in RAM so a flash-read timing/alignment issue cannot
- * corrupt the glyphs seen by the renderer. */
-static uint8_t g_font[FONT_COUNT * FONT_HEIGHT] = {
-    /* space */ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    /* ! */     0x18,0x18,0x18,0x18,0x18,0x00,0x18,0x00,
-    /* " */     0x66,0x66,0x66,0x00,0x00,0x00,0x00,0x00,
-    /* # */     0x24,0x24,0x7e,0x24,0x7e,0x24,0x24,0x00,
-    /* $ */     0x10,0x3c,0x50,0x38,0x14,0x78,0x10,0x00,
-    /* % */     0x62,0x64,0x08,0x10,0x26,0x46,0x00,0x00,
-    /* & */     0x30,0x48,0x30,0x4a,0x44,0x3a,0x00,0x00,
-    /* ' */     0x18,0x18,0x18,0x00,0x00,0x00,0x00,0x00,
-    /* ( */     0x0c,0x18,0x30,0x30,0x30,0x18,0x0c,0x00,
-    /* ) */     0x30,0x18,0x0c,0x0c,0x0c,0x18,0x30,0x00,
-    /* * */     0x00,0x24,0x18,0x7e,0x18,0x24,0x00,0x00,
-    /* + */     0x00,0x18,0x18,0x7e,0x18,0x18,0x00,0x00,
-    /* , */     0x00,0x00,0x00,0x00,0x18,0x18,0x30,0x00,
-    /* - */     0x00,0x00,0x00,0x7e,0x00,0x00,0x00,0x00,
-    /* . */     0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x00,
-    /* / */     0x02,0x04,0x08,0x10,0x20,0x40,0x00,0x00,
-    /* 0 */     0x3c,0x66,0x6e,0x76,0x66,0x66,0x3c,0x00,
-    /* 1 */     0x18,0x38,0x18,0x18,0x18,0x18,0x7e,0x00,
-    /* 2 */     0x3c,0x66,0x06,0x0c,0x30,0x60,0x7e,0x00,
-    /* 3 */     0x3c,0x66,0x06,0x1c,0x06,0x66,0x3c,0x00,
-    /* 4 */     0x06,0x0e,0x1e,0x66,0x7f,0x06,0x06,0x00,
-    /* 5 */     0x7e,0x60,0x7c,0x06,0x06,0x66,0x3c,0x00,
-    /* 6 */     0x3c,0x66,0x60,0x7c,0x66,0x66,0x3c,0x00,
-    /* 7 */     0x7e,0x06,0x0c,0x18,0x30,0x30,0x30,0x00,
-    /* 8 */     0x3c,0x66,0x66,0x3c,0x66,0x66,0x3c,0x00,
-    /* 9 */     0x3c,0x66,0x66,0x3e,0x06,0x66,0x3c,0x00,
-    /* : */     0x00,0x18,0x18,0x00,0x18,0x18,0x00,0x00,
-    /* ; */     0x00,0x18,0x18,0x00,0x18,0x18,0x30,0x00,
-    /* < */     0x0c,0x18,0x30,0x60,0x30,0x18,0x0c,0x00,
-    /* = */     0x00,0x00,0x7e,0x00,0x7e,0x00,0x00,0x00,
-    /* > */     0x30,0x18,0x0c,0x06,0x0c,0x18,0x30,0x00,
-    /* ? */     0x3c,0x66,0x06,0x0c,0x18,0x00,0x18,0x00,
-    /* @ */     0x3c,0x42,0x5e,0x52,0x5e,0x40,0x3c,0x00,
-    /* A */     0x18,0x3c,0x66,0x7e,0x66,0x66,0x66,0x00,
-    /* B */     0x7c,0x66,0x66,0x7c,0x66,0x66,0x7c,0x00,
-    /* C */     0x3c,0x66,0x60,0x60,0x60,0x66,0x3c,0x00,
-    /* D */     0x78,0x6c,0x66,0x66,0x66,0x6c,0x78,0x00,
-    /* E */     0x7e,0x60,0x60,0x78,0x60,0x60,0x7e,0x00,
-    /* F */     0x7e,0x60,0x60,0x78,0x60,0x60,0x60,0x00,
-    /* G */     0x3c,0x66,0x60,0x6e,0x66,0x66,0x3c,0x00,
-    /* H */     0x66,0x66,0x66,0x7e,0x66,0x66,0x66,0x00,
-    /* I */     0x7e,0x18,0x18,0x18,0x18,0x18,0x7e,0x00,
-    /* J */     0x3e,0x0c,0x0c,0x0c,0x0c,0x6c,0x38,0x00,
-    /* K */     0x66,0x6c,0x78,0x70,0x78,0x6c,0x66,0x00,
-    /* L */     0x60,0x60,0x60,0x60,0x60,0x60,0x7e,0x00,
-    /* M */     0x63,0x77,0x7f,0x6b,0x63,0x63,0x63,0x00,
-    /* N */     0x66,0x76,0x7e,0x6e,0x66,0x66,0x66,0x00,
-    /* O */     0x3c,0x66,0x66,0x66,0x66,0x66,0x3c,0x00,
-    /* P */     0x7c,0x66,0x66,0x7c,0x60,0x60,0x60,0x00,
-    /* Q */     0x3c,0x66,0x66,0x66,0x66,0x3c,0x0e,0x00,
-    /* R */     0x7c,0x66,0x66,0x7c,0x78,0x6c,0x66,0x00,
-    /* S */     0x3c,0x66,0x60,0x3c,0x06,0x66,0x3c,0x00,
-    /* T */     0x7e,0x18,0x18,0x18,0x18,0x18,0x18,0x00,
-    /* U */     0x66,0x66,0x66,0x66,0x66,0x66,0x3c,0x00,
-    /* V */     0x66,0x66,0x66,0x66,0x66,0x3c,0x18,0x00,
-    /* W */     0x63,0x63,0x63,0x6b,0x7f,0x77,0x63,0x00,
-    /* X */     0x66,0x66,0x3c,0x18,0x3c,0x66,0x66,0x00,
-    /* Y */     0x66,0x66,0x66,0x3c,0x18,0x18,0x18,0x00,
-    /* Z */     0x7e,0x06,0x0c,0x18,0x30,0x60,0x7e,0x00,
-    /* [ */     0x3c,0x30,0x30,0x30,0x30,0x30,0x3c,0x00,
-    /* \ */    0x40,0x20,0x10,0x08,0x04,0x02,0x00,0x00,
-    /* ] */     0x3c,0x0c,0x0c,0x0c,0x0c,0x0c,0x3c,0x00,
-    /* ^ */     0x18,0x3c,0x66,0x00,0x00,0x00,0x00,0x00,
-    /* _ */     0x00,0x00,0x00,0x00,0x00,0x00,0x7e,0x00,
-    /* ` */     0x30,0x18,0x0c,0x00,0x00,0x00,0x00,0x00,
-    /* a */     0x00,0x00,0x3c,0x06,0x3e,0x66,0x3e,0x00,
-    /* b */     0x60,0x60,0x7c,0x66,0x66,0x66,0x7c,0x00,
-    /* c */     0x00,0x00,0x3c,0x60,0x60,0x60,0x3c,0x00,
-    /* d */     0x06,0x06,0x3e,0x66,0x66,0x66,0x3e,0x00,
-    /* e */     0x00,0x00,0x3c,0x66,0x7e,0x60,0x3c,0x00,
-    /* f */     0x0e,0x18,0x18,0x7e,0x18,0x18,0x18,0x00,
-    /* g */     0x00,0x00,0x3e,0x66,0x66,0x3e,0x06,0x3c,
-    /* h */     0x60,0x60,0x7c,0x66,0x66,0x66,0x66,0x00,
-    /* i */     0x18,0x00,0x38,0x18,0x18,0x18,0x7e,0x00,
-    /* j */     0x0c,0x00,0x0c,0x0c,0x0c,0x6c,0x38,0x00,
-    /* k */     0x60,0x60,0x66,0x6c,0x78,0x6c,0x66,0x00,
-    /* l */     0x38,0x18,0x18,0x18,0x18,0x18,0x7e,0x00,
-    /* m */     0x00,0x00,0x66,0x7f,0x6b,0x6b,0x63,0x00,
-    /* n */     0x00,0x00,0x7c,0x66,0x66,0x66,0x66,0x00,
-    /* o */     0x00,0x00,0x3c,0x66,0x66,0x66,0x3c,0x00,
-    /* p */     0x00,0x00,0x7c,0x66,0x66,0x7c,0x60,0x60,
-    /* q */     0x00,0x00,0x3e,0x66,0x66,0x3e,0x06,0x06,
-    /* r */     0x00,0x00,0x7c,0x66,0x60,0x60,0x60,0x00,
-    /* s */     0x00,0x00,0x3e,0x60,0x3c,0x06,0x7c,0x00,
-    /* t */     0x18,0x18,0x7e,0x18,0x18,0x18,0x0e,0x00,
-    /* u */     0x00,0x00,0x66,0x66,0x66,0x66,0x3e,0x00,
-    /* v */     0x00,0x00,0x66,0x66,0x66,0x3c,0x18,0x00,
-    /* w */     0x00,0x00,0x63,0x6b,0x6b,0x7f,0x36,0x00,
-    /* x */     0x00,0x00,0x66,0x3c,0x18,0x3c,0x66,0x00,
-    /* y */     0x00,0x00,0x66,0x66,0x66,0x3e,0x0c,0x78,
-    /* z */     0x00,0x00,0x7e,0x0c,0x18,0x30,0x7e,0x00,
-    /* { */     0x0c,0x18,0x18,0x30,0x18,0x18,0x0c,0x00,
-    /* | */     0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x00,
-    /* } */     0x30,0x18,0x18,0x0c,0x18,0x18,0x30,0x00,
-    /* ~ */     0x00,0x00,0x32,0x7c,0x4c,0x00,0x00,0x00,
-};
-
-#define COLS    (DISPLAY_WIDTH  / FONT_WIDTH)
-#define ROWS    (DISPLAY_HEIGHT / FONT_HEIGHT)
-
-#define RGB565_BLACK 0x0000U
-#define RGB565_WHITE 0xFFFFU
-#define RGB565_GREEN 0x07E0U
-
-static volatile uint16_t *g_fb = NULL;
-
-/* Write two adjacent RGB565 pixels as one 32-bit word so the 32-bit SDRAM
- * bus gets a clean write instead of a possibly-broken halfword write. */
-static inline void fb_write32(uint32_t x, uint32_t y, uint16_t c0, uint16_t c1)
-{
-    volatile uint32_t *p = (volatile uint32_t *)&g_fb[y * DISPLAY_WIDTH + x];
-    *p = ((uint32_t)c1 << 16) | c0;
-}
-
-static inline uint32_t fb_word_count(uint32_t pixels)
-{
-    return pixels / 2U;
-}
+static lv_obj_t *g_console_label = NULL;
+static char g_rows[ROWS][COLS + 1U];
+static char g_text_buf[LV_LABEL_TEXT_LEN_MAX];
 static uint32_t g_cursor_col = 0;
 static uint32_t g_cursor_row = 0;
-static uint16_t g_fg = RGB565_WHITE;
-static uint16_t g_bg = RGB565_BLACK;
+static volatile uint8_t g_dirty = 0;
 
 static inline void irq_disable(void)
 {
@@ -159,55 +50,30 @@ static inline void irq_enable(void)
     __asm volatile ("cpsie i" ::: "memory");
 }
 
-static inline void dsb(void)
+static void row_clear(uint32_t row)
 {
-    __asm volatile ("dsb" ::: "memory");
-}
-
-static void draw_glyph(uint32_t col, uint32_t row, char c)
-{
-    if (c < FONT_FIRST || c >= FONT_FIRST + FONT_COUNT)
-        c = '?';
-
-    const uint8_t *glyph = &g_font[(uint32_t)(c - FONT_FIRST) * FONT_HEIGHT];
-    uint32_t x0 = col * FONT_WIDTH;
-    uint32_t y0 = row * FONT_HEIGHT;
-
-    for (uint32_t y = 0; y < FONT_HEIGHT; y++) {
-        uint8_t bits = glyph[y];
-        for (uint32_t x = 0; x < FONT_WIDTH; x++) {
-            uint16_t color = (bits & (0x80U >> x)) ? g_fg : g_bg;
-            g_fb[(y0 + y) * DISPLAY_WIDTH + (x0 + x)] = color;
-        }
-    }
-    dsb();
-}
-
-static void clear_row(uint32_t row)
-{
-    uint32_t y0 = row * FONT_HEIGHT;
-    for (uint32_t y = 0; y < FONT_HEIGHT; y++) {
-        for (uint32_t x = 0; x < DISPLAY_WIDTH; x++) {
-            g_fb[(y0 + y) * DISPLAY_WIDTH + x] = g_bg;
-        }
-    }
-    dsb();
+    memset(g_rows[row], ' ', COLS);
+    g_rows[row][COLS] = '\0';
 }
 
 static void scroll_up(void)
 {
-    uint32_t row_bytes = DISPLAY_WIDTH * FONT_HEIGHT * DISPLAY_BPP;
-    uint8_t *fb = (uint8_t *)g_fb;
-    memmove(fb, fb + row_bytes, (ROWS - 1) * row_bytes);
-    dsb();
-    clear_row(ROWS - 1);
+    memmove(g_rows[0], g_rows[1], (size_t)(ROWS - 1U) * sizeof(g_rows[0]));
+    row_clear(ROWS - 1U);
+}
+
+static void console_newline(void)
+{
+    g_cursor_col = 0;
+    g_cursor_row++;
+    if (g_cursor_row >= ROWS) {
+        scroll_up();
+        g_cursor_row = ROWS - 1U;
+    }
 }
 
 void gfx_console_putc(char c)
 {
-    if (!g_fb)
-        return;
-
     irq_disable();
 
     if (c == '\r') {
@@ -215,64 +81,73 @@ void gfx_console_putc(char c)
         return;
     }
     if (c == '\n') {
-        g_cursor_col = 0;
-        g_cursor_row++;
-        if (g_cursor_row >= ROWS) {
-            scroll_up();
-            g_cursor_row = ROWS - 1;
-        }
+        console_newline();
+        g_dirty = 1;
         irq_enable();
         return;
     }
     if (c == '\b') {
-        if (g_cursor_col > 0)
+        if (g_cursor_col > 0U)
             g_cursor_col--;
+        g_dirty = 1;
         irq_enable();
         return;
     }
     if (c == '\t') {
-        g_cursor_col = (g_cursor_col + 8) & ~7U;
-        if (g_cursor_col >= COLS) {
-            g_cursor_col = 0;
-            g_cursor_row++;
-            if (g_cursor_row >= ROWS) {
-                scroll_up();
-                g_cursor_row = ROWS - 1;
-            }
-        }
+        uint32_t next = (g_cursor_col + 8U) & ~7U;
+        while (g_cursor_col < next && g_cursor_col < COLS)
+            g_rows[g_cursor_row][g_cursor_col++] = ' ';
+        if (g_cursor_col >= COLS)
+            console_newline();
+        g_dirty = 1;
         irq_enable();
         return;
     }
 
-    draw_glyph(g_cursor_col, g_cursor_row, c);
+    g_rows[g_cursor_row][g_cursor_col] = c;
     g_cursor_col++;
-    if (g_cursor_col >= COLS) {
-        g_cursor_col = 0;
-        g_cursor_row++;
-        if (g_cursor_row >= ROWS) {
-            scroll_up();
-            g_cursor_row = ROWS - 1;
-        }
-    }
+    if (g_cursor_col >= COLS)
+        console_newline();
+    g_dirty = 1;
 
     irq_enable();
 }
 
-static void console_init(void)
+/* Rebuild g_text_buf from the row grid (trimming trailing spaces per row to
+ * save space) and hand it to the label. Called only when g_dirty is set. */
+static void console_flush(void)
 {
-    g_fb = (volatile uint16_t *)hal_display_fb_addr();
-    for (uint32_t i = 0; i < DISPLAY_WIDTH * DISPLAY_HEIGHT; i++)
-        g_fb[i] = g_bg;
-    dsb();
+    uint32_t off = 0;
 
-    g_cursor_col = 0;
-    g_cursor_row = 0;
+    irq_disable();
+    for (uint32_t r = 0; r < ROWS; r++) {
+        uint32_t len = COLS;
+        while (len > 0U && g_rows[r][len - 1U] == ' ')
+            len--;
+        if (off + len + 1U >= sizeof(g_text_buf))
+            break;
+        memcpy(g_text_buf + off, g_rows[r], len);
+        off += len;
+        g_text_buf[off++] = '\n';
+    }
+    if (off > 0U)
+        off--; /* drop the trailing newline after the last row */
+    g_text_buf[off] = '\0';
+    g_dirty = 0;
+    irq_enable();
 
-    /* Diagnostic text visible immediately after init, before any UART hook. */
-    const char *test = "TEST FONT";
-    while (*test)
-        gfx_console_putc(*test++);
-    dsb();
+    if (g_console_label)
+        lv_label_set_text(g_console_label, g_text_buf);
+}
+
+/* LV_DISPLAY_RENDER_MODE_DIRECT means lv_timer_handler() already rendered
+ * straight into the real framebuffer (see lvgl_port_init() below) -- there
+ * is nothing left to copy out, just acknowledge the flush. */
+static void lv_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
+{
+    (void)area;
+    (void)px_map;
+    lv_display_flush_ready(disp);
 }
 
 void lvgl_port_init(void)
@@ -281,17 +156,57 @@ void lvgl_port_init(void)
     hal_sdram_init();
     hal_uart_puts("[LVGL] display init\r\n");
     hal_display_init();
-    hal_uart_puts("[LVGL] console init\r\n");
-    console_init();
+
+    hal_uart_puts("[LVGL] lv_init\r\n");
+    lv_init();
+
+    lv_display_t *disp = lv_display_get_default();
+    lv_display_set_physical_resolution(disp, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    /* The label draws straight into the SDRAM framebuffer the LTDC scans
+     * out -- render mode DIRECT, no separate copy/flush buffer. */
+    lv_display_set_buffers(disp, (void *)hal_display_fb_addr(), NULL,
+                            (uint32_t)DISPLAY_WIDTH * (uint32_t)DISPLAY_HEIGHT *
+                                (uint32_t)sizeof(uint16_t),
+                            LV_DISPLAY_RENDER_MODE_DIRECT);
+    lv_display_set_flush_cb(disp, lv_flush_cb);
+
+    g_console_label = lv_label_create(lv_screen_active());
+    if (!g_console_label) {
+        hal_uart_puts("[LVGL] label create FAILED\r\n");
+        return;
+    }
+    lv_obj_set_pos(g_console_label, 0, 0);
+    lv_obj_set_size(g_console_label, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    lv_obj_set_style_bg_color(g_console_label, lv_color_black(), 0);
+    lv_obj_set_style_text_color(g_console_label, lv_color_white(), 0);
+    lv_obj_set_style_pad_all(g_console_label, 0, 0);
+
+    for (uint32_t r = 0; r < ROWS; r++)
+        row_clear(r);
+    g_cursor_col = 0;
+    g_cursor_row = 0;
+
+    /* Diagnostic text visible immediately after init, before any UART hook. */
+    const char *test = "TEST FONT (LVGL)";
+    while (*test)
+        gfx_console_putc(*test++);
+
+    console_flush();
+    lv_timer_handler();
+
     hal_uart_puts("[LVGL] port init done\r\n");
 }
 
 void lvgl_port_tick(uint32_t ms)
 {
-    (void)ms;
+    lv_tick_inc(ms);
 }
 
 uint32_t lvgl_port_handler(void)
 {
+    if (g_dirty) {
+        console_flush();
+        lv_timer_handler();
+    }
     return 16;
 }

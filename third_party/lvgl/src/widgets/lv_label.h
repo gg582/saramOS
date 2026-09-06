@@ -10,7 +10,15 @@
 extern "C" {
 #endif
 
-#define LV_LABEL_TEXT_LEN_MAX       256
+/* This is malloc'd per label (see lv_label_create()) against a bare-metal
+ * heap (_sbrk() in syscalls.c) that has no out-of-memory check at all --
+ * it just grows from _end with no bound, so an allocation that doesn't
+ * fit silently corrupts whatever memory it lands on (typically another
+ * process's stack) instead of failing cleanly. Kept modest for that
+ * reason; console_flush() already stops appending further rows once this
+ * fills rather than overflowing it, so a console taller than this fits
+ * just degrades to showing fewer trailing rows, not a crash. */
+#define LV_LABEL_TEXT_LEN_MAX       1024
 
 typedef struct {
     char text[LV_LABEL_TEXT_LEN_MAX];

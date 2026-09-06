@@ -87,6 +87,8 @@ static int gfxshell_render_process(saramos_process_t *p)
     PROC_BEGIN(p);
     for (;;) {
         gfxshell_drain_rb();
+        lvgl_port_tick(16);
+        lvgl_port_handler();
         PROC_SLEEP_MS(p, 16);
     }
     PROC_END(p);

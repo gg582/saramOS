@@ -68,6 +68,15 @@ void lv_display_set_buffers(lv_display_t *disp, void *buf1, void *buf2,
     disp->render_mode = render_mode;
     disp->layer_bottom.buf = buf1;
     disp->layer_bottom.buf_size = buf_size;
+    /* buf_area was never set anywhere, which left it zeroed by the
+     * memset() in lv_display_create() -- i.e. a single pixel at (0,0).
+     * lv_obj_refresh()'s "full" area and lv_draw.c's put_pixel() bounds
+     * check both key off this field, so without it nothing outside that
+     * one pixel was ever actually drawn. Set it to the physical
+     * resolution passed to lv_display_create() (or later overridden via
+     * lv_display_set_physical_resolution()). */
+    lv_area_set(&disp->layer_bottom.buf_area, 0, 0,
+                disp->physical_hor_res - 1, disp->physical_ver_res - 1);
 }
 
 lv_display_t *lv_display_get_default(void)

@@ -1,8 +1,10 @@
 /*
  * Display port header for the graphical-shell app.
  *
- * The bundled "LVGL" is only a stub without a real renderer, so the graphical
- * shell draws directly into the SDRAM framebuffer and lets the LTDC scan it out.
+ * The on-screen console is rendered through the vendored, minimal LVGL v9
+ * API-compatible implementation in third_party/lvgl (a single full-screen
+ * lv_label object), configured in LV_DISPLAY_RENDER_MODE_DIRECT so LVGL
+ * renders straight into the real SDRAM framebuffer the LTDC scans out.
  */
 #ifndef LVGL_PORT_H
 #define LVGL_PORT_H
