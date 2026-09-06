@@ -1048,11 +1048,25 @@ static void ltdc_init(uint32_t fb_addr)
 
     LTDC->SRCR = LTDC_SRCR_IMR;
 
-    /* Enable LTDC with active-high control signals. */
-    LTDC->GCR = LTDC_GCR_LTDCEN_Msk |
-                LTDC_GCR_HSPOL_Msk |
-                LTDC_GCR_VSPOL_Msk |
-                LTDC_GCR_DEPOL_Msk;
+    /* Enable LTDC with ACTIVE-LOW control signals.
+     *
+     * Found by reading Zephyr's actual devicetree data all the way
+     * through rather than just its driver source: the LTDC's own polarity
+     * comes from a DIFFERENT devicetree node than the DSI host's.
+     * boards/shields/st_b_lcd40_dsi1_mb1166.overlay's "display-timings"
+     * child node (which display_stm32_ltdc.c's HAL_LTDC Init.HSPolarity
+     * etc. are built from) sets hsync-active/vsync-active/de-active all
+     * to <0> -- i.e. ACTIVE LOW for the LTDC -- while the SEPARATE
+     * &zephyr_mipi_dsi node in boards/stm32f769i_disco.overlay (which
+     * feeds dsi_stm32.c's VidCfg->HSPolarity/VSPolarity/DEPolarity)
+     * separately sets vs-active-high/hs-active-high/de-active-high, i.e.
+     * ACTIVE HIGH for the DSI host. These are NOT required to match each
+     * other -- this driver had them both set to active-high (matching
+     * each other, matching a generic AN4860 example, but NOT matching
+     * this board+panel's actual verified-working configuration). Only
+     * the LTDC side needed correcting; the DSI host's own polarity bits
+     * (DSI_LPCR) are already active-high, unchanged. */
+    LTDC->GCR = LTDC_GCR_LTDCEN_Msk;
 }
 
 /* -------------------------------------------------------------------------- */
