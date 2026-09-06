@@ -1,6 +1,7 @@
 #include <hal/board.h>
 
 #define SCB_BASE        0xE000ED00U
+#define SCB_VTOR        (*(volatile uint32_t *)(SCB_BASE + 0x08U))
 #define SCB_CCR         (*(volatile uint32_t *)(SCB_BASE + 0x14U))
 
 #define SYSTICK_BASE    0xE000E010U
@@ -36,6 +37,17 @@ static inline void isb_barrier(void)
     __asm volatile ("isb" ::: "memory");
 }
 
+/* MPU registers (Cortex-M7). */
+#define SCB_MPU_TYPE    (*(volatile uint32_t *)(SCB_BASE + 0x90U))
+#define SCB_MPU_CTRL    (*(volatile uint32_t *)(SCB_BASE + 0x94U))
+#define SCB_MPU_RNR     (*(volatile uint32_t *)(SCB_BASE + 0x98U))
+#define SCB_MPU_RBAR    (*(volatile uint32_t *)(SCB_BASE + 0x9CU))
+#define SCB_MPU_RASR    (*(volatile uint32_t *)(SCB_BASE + 0xA0U))
+
+#define MPU_CTRL_ENABLE      (1U << 0)
+#define MPU_CTRL_HFNMIENA    (1U << 1)
+#define MPU_CTRL_PRIVDEFENA  (1U << 2)
+
 /* PWR registers needed for high-speed operation. */
 #define PWR_BASE        0x40007000U
 #define PWR_CR1         (*(volatile uint32_t *)(PWR_BASE + 0x00U))
@@ -62,6 +74,36 @@ static void enable_hse(void)
         if (--timeout == 0U)
             break;
     }
+}
+
+static void mpu_init(void)
+{
+    /* If no MPU is present, skip. */
+    if ((SCB_MPU_TYPE & 0xFFU) == 0U)
+        return;
+
+    /* Region 0: external SDRAM (0xC0000000, 16 MB).
+     * Normal, Non-cacheable, Shareable memory (TEX=001,C=0,B=0,S=1). This
+     * still forbids the CPU from caching stale copies of LTDC/DMA-written
+     * data without any cache-maintenance calls, but unlike Strongly-ordered
+     * it permits unaligned accesses and CPU write bursting, which
+     * Strongly-ordered forbids at the architecture level and which the
+     * framebuffer (bulk RGB565 writes) and DMA2D/LTDC depend on. */
+    SCB_MPU_RNR = 0U;
+    SCB_MPU_RBAR = 0xC0000000U;
+    /* XN=1, AP=full access, TEX=1, S=1, C=0, B=0 (Normal, Non-cacheable),
+     * SIZE=23 (2^24 = 16 MB), ENABLE=1. */
+    SCB_MPU_RASR = (1U << 28) |
+                   (3U << 24) |
+                   (1U << 19) |
+                   (1U << 18) |
+                   (23U << 1) |
+                   (1U << 0);
+
+    /* Enable MPU with default memory map for unconfigured regions. */
+    SCB_MPU_CTRL = MPU_CTRL_ENABLE | MPU_CTRL_PRIVDEFENA;
+    dsb_barrier();
+    isb_barrier();
 }
 
 static void set_sysclk_pll(void)
@@ -116,6 +158,8 @@ static void set_sysclk_pll(void)
 
 void hal_system_init(void)
 {
+    SCB_VTOR = 0x08000000U;
+
     /* Enable I-Cache and D-Cache for Cortex-M7.
      * The caches are invalid after reset, so we can enable directly.
      */
@@ -133,6 +177,11 @@ void hal_system_init(void)
 
     enable_hse();
     set_sysclk_pll();
+
+    /* Configure MPU before caches are enabled or SDRAM is accessed.
+     * SDRAM must be treated as Device/Shareable so CPU writes are visible
+     * to LTDC in order and FMC read-after-write hazards are avoided. */
+    mpu_init();
 }
 
 void scb_inv_dcache(void *addr, uint32_t len)
@@ -172,6 +221,7 @@ void hal_systick_init(void)
     SYSTICK_CVR = 0;
     SYSTICK_RVR = SYSTICK_RELOAD;
     SYSTICK_CSR = SYSTICK_ENABLE | SYSTICK_TICKINT | SYSTICK_CLKSOURCE;
+    __asm volatile ("cpsie i" ::: "memory");
 }
 
 void SysTick_Handler(void)

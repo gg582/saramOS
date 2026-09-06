@@ -472,8 +472,19 @@ static int dsi_long_write(uint8_t cmd, const uint8_t *params, uint32_t nparams)
 
 static int otm8009a_write_reg(uint8_t reg, const uint8_t *params, uint32_t nparams)
 {
+    /* Verified against ST's reference OTM8009A driver (otm8009a.c /
+     * stm32f769i_discovery_lcd.c): every "short" register write in this
+     * init table -- including the address-shift NOP prefixes and the
+     * nominally zero-parameter DCS commands (SLPOUT, DISPON, RAMWR) -- is
+     * always sent as a DCS Short Write with ONE parameter byte
+     * (0x15 / DSI_DCS_SHORT_WRITE1). The reference tables pair every such
+     * command with a data byte (e.g. {NOP, 0x00}, {DISPON, 0x00}) and the
+     * IO layer always transmits pParams[1] regardless of the caller's
+     * "NbrParams" value. Selecting the 0-parameter packet type (0x05)
+     * here for nparams==0 silently drops that byte and leaves the panel
+     * unconfigured, which is why gfxshell produced no picture. */
     if (nparams <= 1U)
-        return dsi_short_write(reg, params, (uint8_t)nparams);
+        return dsi_short_write(reg, params, 1U);
     else
         return dsi_long_write(reg, params, nparams);
 }
@@ -624,11 +635,12 @@ static int otm8009a_init(void)
     ret += otm8009a_write_reg(OTM8009A_CMD_COLMOD, &short_reg_data[37], 1);
 
     /* Landscape orientation. */
-    ret += otm8009a_write_reg(OTM8009A_CMD_MADCTR, &short_reg_data[38], 1);
+    uint8_t madctr = OTM8009A_MADCTR_LANDSCAPE;
+    ret += otm8009a_write_reg(OTM8009A_CMD_MADCTR, &madctr, 1);
     ret += otm8009a_write_reg(OTM8009A_CMD_CASET, lcd_reg_data27, sizeof(lcd_reg_data27));
     ret += otm8009a_write_reg(OTM8009A_CMD_PASET, lcd_reg_data28, sizeof(lcd_reg_data28));
 
-    /* CABC / brightness. */
+    /* CABC / brightness (use the original ST BSP values). */
     ret += otm8009a_write_reg(OTM8009A_CMD_WRDISBV, &short_reg_data[39], 1);
     ret += otm8009a_write_reg(OTM8009A_CMD_WRCTRLD, &short_reg_data[40], 1);
     ret += otm8009a_write_reg(OTM8009A_CMD_WRCABC, &short_reg_data[41], 1);
@@ -767,9 +779,9 @@ static int dsi_video_mode_init(void)
     uint32_t hbp_byte  = (hbp  * LANE_BYTE_CLK_KHZ) / LCD_CLOCK_KHZ;
     uint32_t hline_byte = ((hact + hsa + hbp + hfp) * LANE_BYTE_CLK_KHZ) / LCD_CLOCK_KHZ;
 
-    /* Make sure command mode is disabled and DSI video mode is selected. */
-    DSI->MCR &= ~DSI_MCR_CMDM_Msk;
-    DSI->WCFGR &= ~DSI_WCFGR_DSIM_Msk;
+    /* This only programs the video-mode timing/format registers; DSI is
+     * never put into Command Mode at all (see hal_display_init()), so
+     * there is nothing to switch out of here. */
 
     /* Video mode type: burst. */
     DSI->VMCR &= ~DSI_VMCR_VMT_Msk;
@@ -920,21 +932,22 @@ void hal_display_init(void)
     if (dsi_host_init() < 0)
         return;
 
-    /* Send OTM8009A init commands in DSI command mode.  The wrapper stays
-     * off until the panel is ready.
+    /* Match the ST reference bring-up order (stm32f769i_discovery_lcd.c):
+     * configure DSI Video Mode and LTDC and START the video stream FIRST,
+     * and only THEN send the OTM8009A panel init commands -- as Low-Power
+     * DCS commands inserted into the already-running video stream (video
+     * mode's LPCE/LPxxE bits, set below, are what makes this possible).
+     *
+     * The previous order (send all OTM8009A commands first, in a manual
+     * Command-Mode session with no active video stream, then switch to
+     * Video Mode afterward) is not how the panel is meant to be brought
+     * up: the panel briefly showed whatever was in its own GRAM/garbage
+     * state as soon as a stream appeared (the solid color bands the user
+     * saw), then blanked itself, even though the host's own DSI/LTDC
+     * registers and the SDRAM framebuffer content remained perfectly
+     * valid throughout -- i.e. the fault was on the panel side, not
+     * something a host-side register readback could catch.
      */
-    DSI->MCR |= DSI_MCR_CMDM_Msk;
-    DSI->WCFGR |= DSI_WCFGR_DSIM_Msk;
-    DSI->CR |= DSI_CR_EN_Msk;
-
-    hal_uart_puts("[DISP] sending OTM init\r\n");
-    if (otm8009a_init() < 0)
-        return;
-
-    /* Switch to video mode and configure LTDC. */
-    DSI->MCR &= ~DSI_MCR_CMDM_Msk;
-    DSI->WCFGR &= ~DSI_WCFGR_DSIM_Msk;
-
     if (dsi_video_mode_init() < 0)
         return;
     dsi_phy_timers_init();
@@ -942,9 +955,14 @@ void hal_display_init(void)
     hal_uart_puts("[DISP] ltdc init\r\n");
     ltdc_init(g_fb_addr);
 
-    /* Start DSI host + wrapper together so LTDC pixels flow to the panel. */
+    /* Start DSI host + wrapper together so LTDC pixels flow to the panel
+     * before any panel commands are sent. */
     DSI->CR |= DSI_CR_EN_Msk;
     DSI->WCR |= DSI_WCR_DSIEN_Msk;
+
+    hal_uart_puts("[DISP] sending OTM init\r\n");
+    if (otm8009a_init() < 0)
+        return;
 
     hal_display_backlight_on();
     hal_uart_puts("[DISP] backlight on\r\n");
