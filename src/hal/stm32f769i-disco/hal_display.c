@@ -780,9 +780,9 @@ static int dsi_video_mode_init(void)
     uint32_t hbp_byte  = (hbp  * LANE_BYTE_CLK_KHZ) / LCD_CLOCK_KHZ;
     uint32_t hline_byte = ((hact + hsa + hbp + hfp) * LANE_BYTE_CLK_KHZ) / LCD_CLOCK_KHZ;
 
-    /* hal_display_init() has already switched Command Mode back off
-     * before calling this, so there is nothing to clear here; this
-     * function only programs the video-mode timing/format registers. */
+    /* DSI is never put into Command Mode at all in this bring-up path
+     * (see hal_display_init()); this only programs the video-mode
+     * timing/format registers. */
 
     /* Video mode type: burst. */
     DSI->VMCR &= ~DSI_VMCR_VMT_Msk;
@@ -838,13 +838,26 @@ static int dsi_video_mode_init(void)
     DSI->VVACR &= ~DSI_VVACR_VA_Msk;
     DSI->VVACR |= (vact << DSI_VVACR_VA_Pos);
 
-    /* Low-power command settings (follow the ST BSP). */
+    /* Low-power command settings.
+     *
+     * LPSIZE/VLPSIZE are not arbitrary: per AN4860 ("LP command packet
+     * size"), they must be calculated from the actual line/porch timing,
+     * or the DSI host either violates video timing (too high) or keeps
+     * deferring pending commands to the last line of the frame (too low)
+     * -- for our exact timing (tL=31.72us line time, tHACT=19.2us in
+     * burst mode at 3 bytes/pixel), AN4860's formulas give LPSIZE~=28.9
+     * and VLPSIZE~=8.9. The previous hardcoded LPSIZE=16/VLPSIZE=0 left
+     * VLPSIZE at zero -- meaning essentially no command fits during the
+     * active-video (VACT) region at all -- which is why sending the ~80
+     * OTM8009A commands as LP-during-video took anywhere from under a
+     * second to nearly ten seconds, run to run (each one repeatedly
+     * deferred to the frame's last line until it could go out). */
     DSI->VMCR &= ~DSI_VMCR_LPCE_Msk;
     DSI->VMCR |= DSI_LP_COMMAND_ENABLE;
 
     DSI->LPMCR &= ~(DSI_LPMCR_LPSIZE_Msk | DSI_LPMCR_VLPSIZE_Msk);
-    DSI->LPMCR |= (16U << DSI_LPMCR_LPSIZE_Pos);
-    DSI->LPMCR |= 0U;
+    DSI->LPMCR |= (28U << DSI_LPMCR_LPSIZE_Pos);
+    DSI->LPMCR |= (8U << DSI_LPMCR_VLPSIZE_Pos);
 
     DSI->VMCR |= DSI_VMCR_LPHFPE_Msk |
                  DSI_VMCR_LPHBPE_Msk |
@@ -938,36 +951,23 @@ void hal_display_init(void)
     if (dsi_host_init() < 0)
         return;
 
-    /* The ST reference (stm32f769i_discovery_lcd.c) starts DSI Video Mode
-     * and LTDC first and sends the OTM8009A init commands as Low-Power
-     * DCS commands inserted into the already-running video stream. That
-     * was tried here and measured to be a real problem for this
-     * implementation: sending ~80 commands as LP insertions during live
-     * video contends with the video stream for blanking-window slots, and
-     * on this polling-based (non-interrupt-driven) command path that made
-     * otm8009a_init() take anywhere from under a second to nearly ten
-     * seconds to finish, run to run -- i.e. the panel would sit
-     * half-configured, with a live video signal already arriving, for a
-     * highly variable amount of time. That is consistent with what was
-     * observed on the panel: different, wrong-looking content each run,
-     * fading to black once the panel decided something was wrong.
+    /* Match ST's own reference bring-up order -- both stm32f769i_discovery_
+     * lcd.c and AN4860's STM32CubeMX-generated example agree: LTDC is
+     * enabled, then HAL_DSI_Start() (DSI CR.EN + WCR.DSIEN) is called, and
+     * only THEN is OTM8009A_Init() run -- i.e. the OTM8009A commands are
+     * sent as Low-Power DCS commands inserted into the already-running
+     * video stream, not beforehand in a separate Command Mode session.
      *
-     * So: send the OTM8009A commands first, in a manual Command Mode
-     * session with no video stream running at all (fast, deterministic,
-     * no contention), and only switch to Video Mode once the panel is
-     * already fully configured and sleeping. */
-    DSI->MCR |= DSI_MCR_CMDM_Msk;
-    DSI->WCFGR |= DSI_WCFGR_DSIM_Msk;
-    DSI->CR |= DSI_CR_EN_Msk;
-
-    hal_uart_puts("[DISP] sending OTM init\r\n");
-    if (otm8009a_init() < 0)
-        return;
-
-    /* Switch to video mode and configure LTDC. */
-    DSI->MCR &= ~DSI_MCR_CMDM_Msk;
-    DSI->WCFGR &= ~DSI_WCFGR_DSIM_Msk;
-
+     * An earlier attempt at this order measured otm8009a_init() taking
+     * anywhere from under a second to ~10s to finish, run to run. Per
+     * AN4860 ("LP command packet size"), that is the documented symptom
+     * of DSI_LPMCR's LPSIZE/VLPSIZE being set too low for the actual line
+     * timing: commands that do not fit get repeatedly deferred to the
+     * last line of the frame. This driver had them hardcoded to 16/0
+     * (VLPSIZE=0 leaves essentially no room during the active-video
+     * region at all); dsi_video_mode_init() now calculates and uses the
+     * correct values (28/8) for this exact timing, so that path should no
+     * longer stall. */
     if (dsi_video_mode_init() < 0)
         return;
     dsi_phy_timers_init();
@@ -975,9 +975,14 @@ void hal_display_init(void)
     hal_uart_puts("[DISP] ltdc init\r\n");
     ltdc_init(g_fb_addr);
 
-    /* Start DSI host + wrapper together so LTDC pixels flow to the panel. */
+    /* Start DSI host + wrapper together so LTDC pixels flow to the panel
+     * before any panel commands are sent. */
     DSI->CR |= DSI_CR_EN_Msk;
     DSI->WCR |= DSI_WCR_DSIEN_Msk;
+
+    hal_uart_puts("[DISP] sending OTM init\r\n");
+    if (otm8009a_init() < 0)
+        return;
 
     hal_display_backlight_on();
     hal_uart_puts("[DISP] backlight on\r\n");
