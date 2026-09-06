@@ -337,6 +337,7 @@ typedef struct {
 #define OTM8009A_CMD_WRCABCMB   0x5EU
 
 #define OTM8009A_COLMOD_RGB565  0x55U
+#define OTM8009A_COLMOD_RGB888  0x77U
 #define OTM8009A_MADCTR_LANDSCAPE 0x60U
 
 /* --- Panel timings (OTM8009A 800x480 landscape) --- */
@@ -526,8 +527,8 @@ static int otm8009a_init(void)
     static const uint8_t short_reg_data[] = {
         0x00, 0x00, 0x80, 0x30, 0x8A, 0x40, 0xB1, 0xA9, 0x91, 0x34, 0xB4, 0x50, 0x4E, 0x81, 0x66, 0xA1,
         0x08, 0x92, 0x01, 0x95, 0x94, 0x33, 0xA3, 0x1B, 0x82, 0x83, 0x83, 0x0E, 0xA6, 0xA0, 0xB0, 0xC0,
-        0xD0, 0x90, 0xE0, 0xF0, 0x00, OTM8009A_COLMOD_RGB565, 0x77, 0x7F, 0x2C, 0x02, 0xFF, 0x00,
-        0x00, 0x00, 0x66, 0xB6, 0x06, 0xB1, 0x06
+        0xD0, 0x90, 0xE0, 0xF0, 0x00, OTM8009A_COLMOD_RGB888, 0x77, 0x7F, 0x2C, 0x02, 0xFF, 0x00,
+        0x00, 0x00, 0x66, 0xB6, 0x06, 0xB1, 0x05
     };
 
     int ret = 0;
@@ -779,9 +780,9 @@ static int dsi_video_mode_init(void)
     uint32_t hbp_byte  = (hbp  * LANE_BYTE_CLK_KHZ) / LCD_CLOCK_KHZ;
     uint32_t hline_byte = ((hact + hsa + hbp + hfp) * LANE_BYTE_CLK_KHZ) / LCD_CLOCK_KHZ;
 
-    /* This only programs the video-mode timing/format registers; DSI is
-     * never put into Command Mode at all (see hal_display_init()), so
-     * there is nothing to switch out of here. */
+    /* hal_display_init() has already switched Command Mode back off
+     * before calling this, so there is nothing to clear here; this
+     * function only programs the video-mode timing/format registers. */
 
     /* Video mode type: burst. */
     DSI->VMCR &= ~DSI_VMCR_VMT_Msk;
@@ -803,13 +804,18 @@ static int dsi_video_mode_init(void)
     DSI->LPCR &= ~(DSI_LPCR_DEP_Msk | DSI_LPCR_VSP_Msk | DSI_LPCR_HSP_Msk);
     DSI->LPCR |= DSI_LPCR_DEP_Msk | DSI_LPCR_VSP_Msk | DSI_LPCR_HSP_Msk;
 
-    /* Color coding: RGB565 for both DSI host and wrapper. */
+    /* Color coding: RGB888 on the wire (matches the ST reference for this
+     * exact panel/BSP), independent of the LTDC layer's own RGB565 memory
+     * pixel format -- the LTDC always expands each layer to a full
+     * internal ARGB representation before driving its parallel RGB bus
+     * into the wrapper, so the framebuffer can stay RGB565 either way.
+     * The OTM8009A's own COLMOD register is set to match (0x77). */
     DSI->LCOLCR &= ~DSI_LCOLCR_COLC_Msk;
-    DSI->LCOLCR |= (DSI_RGB565 << DSI_LCOLCR_COLC_Pos);
+    DSI->LCOLCR |= (DSI_RGB888 << DSI_LCOLCR_COLC_Pos);
     DSI->LCOLCR &= ~DSI_LCOLCR_LPE_Msk;
 
     DSI->WCFGR &= ~DSI_WCFGR_COLMUX_Msk;
-    DSI->WCFGR |= (DSI_RGB565 << DSI_WCFGR_COLMUX_Pos);
+    DSI->WCFGR |= (DSI_RGB888 << DSI_WCFGR_COLMUX_Pos);
 
     DSI->VHSACR &= ~DSI_VHSACR_HSA_Msk;
     DSI->VHSACR |= (hsa_byte << DSI_VHSACR_HSA_Pos);
@@ -932,22 +938,36 @@ void hal_display_init(void)
     if (dsi_host_init() < 0)
         return;
 
-    /* Match the ST reference bring-up order (stm32f769i_discovery_lcd.c):
-     * configure DSI Video Mode and LTDC and START the video stream FIRST,
-     * and only THEN send the OTM8009A panel init commands -- as Low-Power
-     * DCS commands inserted into the already-running video stream (video
-     * mode's LPCE/LPxxE bits, set below, are what makes this possible).
+    /* The ST reference (stm32f769i_discovery_lcd.c) starts DSI Video Mode
+     * and LTDC first and sends the OTM8009A init commands as Low-Power
+     * DCS commands inserted into the already-running video stream. That
+     * was tried here and measured to be a real problem for this
+     * implementation: sending ~80 commands as LP insertions during live
+     * video contends with the video stream for blanking-window slots, and
+     * on this polling-based (non-interrupt-driven) command path that made
+     * otm8009a_init() take anywhere from under a second to nearly ten
+     * seconds to finish, run to run -- i.e. the panel would sit
+     * half-configured, with a live video signal already arriving, for a
+     * highly variable amount of time. That is consistent with what was
+     * observed on the panel: different, wrong-looking content each run,
+     * fading to black once the panel decided something was wrong.
      *
-     * The previous order (send all OTM8009A commands first, in a manual
-     * Command-Mode session with no active video stream, then switch to
-     * Video Mode afterward) is not how the panel is meant to be brought
-     * up: the panel briefly showed whatever was in its own GRAM/garbage
-     * state as soon as a stream appeared (the solid color bands the user
-     * saw), then blanked itself, even though the host's own DSI/LTDC
-     * registers and the SDRAM framebuffer content remained perfectly
-     * valid throughout -- i.e. the fault was on the panel side, not
-     * something a host-side register readback could catch.
-     */
+     * So: send the OTM8009A commands first, in a manual Command Mode
+     * session with no video stream running at all (fast, deterministic,
+     * no contention), and only switch to Video Mode once the panel is
+     * already fully configured and sleeping. */
+    DSI->MCR |= DSI_MCR_CMDM_Msk;
+    DSI->WCFGR |= DSI_WCFGR_DSIM_Msk;
+    DSI->CR |= DSI_CR_EN_Msk;
+
+    hal_uart_puts("[DISP] sending OTM init\r\n");
+    if (otm8009a_init() < 0)
+        return;
+
+    /* Switch to video mode and configure LTDC. */
+    DSI->MCR &= ~DSI_MCR_CMDM_Msk;
+    DSI->WCFGR &= ~DSI_WCFGR_DSIM_Msk;
+
     if (dsi_video_mode_init() < 0)
         return;
     dsi_phy_timers_init();
@@ -955,14 +975,9 @@ void hal_display_init(void)
     hal_uart_puts("[DISP] ltdc init\r\n");
     ltdc_init(g_fb_addr);
 
-    /* Start DSI host + wrapper together so LTDC pixels flow to the panel
-     * before any panel commands are sent. */
+    /* Start DSI host + wrapper together so LTDC pixels flow to the panel. */
     DSI->CR |= DSI_CR_EN_Msk;
     DSI->WCR |= DSI_WCR_DSIEN_Msk;
-
-    hal_uart_puts("[DISP] sending OTM init\r\n");
-    if (otm8009a_init() < 0)
-        return;
 
     hal_display_backlight_on();
     hal_uart_puts("[DISP] backlight on\r\n");
