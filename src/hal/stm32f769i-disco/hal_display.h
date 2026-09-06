@@ -28,8 +28,19 @@ extern "C" {
 #define DISP_RESET_PORT     GPIOJ_BASE
 #define DISP_RESET_PIN      15U
 
-/* Initialize DSI + LTDC + OTM8009A and turn on backlight. */
+/* Initialize DSI + LTDC config + OTM8009A (panel awake and initialized)
+ * but do NOT start Video Mode / LTDC scan-out / backlight yet. Callers
+ * must write their desired first-frame content to the framebuffer
+ * (hal_display_fb_addr()) and then call hal_display_start_video() --
+ * see that function's comment for why this is split in two: writing the
+ * framebuffer only after video output has already started produces an
+ * unsynchronized tearing race (confirmed on hardware). */
 void hal_display_init(void);
+
+/* Start LTDC scan-out + DSI Video Mode + backlight. Call once, after
+ * hal_display_init() and after the desired first frame has already been
+ * written to the framebuffer. */
+void hal_display_start_video(void);
 
 /* Return the configured framebuffer address (in SDRAM). */
 uint32_t hal_display_fb_addr(void);

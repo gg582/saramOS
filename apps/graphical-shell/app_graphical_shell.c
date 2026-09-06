@@ -220,11 +220,23 @@ static void cli_picture(const char *arg)
         hal_uart_puts("picture: init display\r\n");
         hal_sdram_init();
         hal_display_init();
+        /* Draw the actual first frame *before* starting video output --
+         * hal_display_init() leaves the panel awake but Video Mode not
+         * yet started specifically so this can happen first. Drawing
+         * into the framebuffer only after LTDC is already scanning it
+         * out (the old order here) raced the draw against the scan-out
+         * with no synchronization at all, and was the real cause of the
+         * "picture only partially/inconsistently visible" symptom that
+         * consumed most of a long hardware bring-up investigation --
+         * see the comment in hal_display_init() for the full story. */
+        draw_house_picture();
+        hal_display_start_video();
         g_picture_display_ready = 1;
         hal_uart_puts("picture: display ready\r\n");
+    } else {
+        draw_house_picture();
     }
 
-    draw_house_picture();
     hal_uart_puts("picture: drawn\r\n");
 }
 

@@ -194,6 +194,12 @@ void lvgl_port_init(void)
     console_flush();
     lv_timer_handler();
 
+    /* Only now start video output -- see hal_display_init()'s comment:
+     * the first real frame (the console text just rendered above) must
+     * already be in the framebuffer before LTDC starts scanning it out,
+     * or the two race with no synchronization at all. */
+    hal_display_start_video();
+
     hal_uart_puts("[LVGL] port init done\r\n");
 }
 
