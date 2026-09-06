@@ -228,10 +228,40 @@ static void cli_picture(const char *arg)
     hal_uart_puts("picture: drawn\r\n");
 }
 
+/* Reads the OTM8009A's own self-reported Display Power Mode (DCS 0x0A)
+ * over the live DSI link. Callable any time after "picture" or "gfxshell"
+ * has run -- e.g. right after the on-screen image is seen to fade -- to
+ * check whether the panel's own internal state actually changed (it
+ * decided to blank itself) or still reports Display On even though
+ * nothing is visible (pointing at the physical link/glass instead). */
+static void cli_dsiread(const char *arg)
+{
+    (void)arg;
+
+    if (!g_gfx_active && !g_picture_display_ready) {
+        hal_uart_puts("dsiread: display not initialized yet (run gfxshell or picture first)\r\n");
+        return;
+    }
+
+    uint8_t power_mode = 0;
+    if (hal_display_read_power_mode(&power_mode) == 0) {
+        char buf[112];
+        snprintf(buf, sizeof(buf),
+                 "dsiread: power mode=0x%02x (booster=%d idle=%d partial=%d sleep_out=%d normal=%d display_on=%d)\r\n",
+                 power_mode,
+                 (power_mode >> 7) & 1, (power_mode >> 6) & 1, (power_mode >> 5) & 1,
+                 (power_mode >> 4) & 1, (power_mode >> 3) & 1, (power_mode >> 2) & 1);
+        hal_uart_puts(buf);
+    } else {
+        hal_uart_puts("dsiread: TIMEOUT (link unresponsive)\r\n");
+    }
+}
+
 void app_register_commands(void)
 {
     extern void cli_register_command(const char *name,
                                      void (*fn)(const char *arg));
     cli_register_command("gfxshell", cli_gfxshell);
     cli_register_command("picture", cli_picture);
+    cli_register_command("dsiread", cli_dsiread);
 }

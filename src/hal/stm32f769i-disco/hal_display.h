@@ -38,6 +38,14 @@ uint32_t hal_display_fb_addr(void);
 void hal_display_backlight_on(void);
 void hal_display_backlight_off(void);
 
+/* Read the OTM8009A's MIPI DCS "Display Power Mode" register (0x0A) over
+ * the live DSI link. Returns 0 and fills *out on success, -1 on timeout
+ * (e.g. if the link has genuinely gone unresponsive). Callable any time
+ * after hal_display_init() -- used to check whether the panel's own
+ * self-reported state (Display On/Off, Sleep In/Out, ...) changes after
+ * the point where the picture on screen is observed to fade. */
+int hal_display_read_power_mode(uint8_t *out);
+
 #ifdef __cplusplus
 }
 #endif

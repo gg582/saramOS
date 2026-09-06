@@ -228,6 +228,15 @@ typedef struct {
 #define DSI_GPSR_CMDFE_Msk          (1U << DSI_GPSR_CMDFE_Pos)
 #define DSI_GPSR_CMDFF_Pos          1U
 #define DSI_GPSR_CMDFF_Msk          (1U << DSI_GPSR_CMDFF_Pos)
+/* Verified against the real STM32F7 CMSIS device header
+ * (stm32f769xx.h): DSI_GPSR_PRDFE_Pos = 4, DSI_GPSR_RCB_Pos = 6. */
+#define DSI_GPSR_PRDFE_Pos          4U
+#define DSI_GPSR_PRDFE_Msk          (1U << DSI_GPSR_PRDFE_Pos)
+#define DSI_GPSR_RCB_Pos            6U
+#define DSI_GPSR_RCB_Msk            (1U << DSI_GPSR_RCB_Pos)
+/* Verified against the real STM32F7 HAL (stm32f7xx_hal_dsi.h):
+ * DSI_DCS_SHORT_PKT_READ = 0x06. */
+#define DSI_DCS_SHORT_READ          0x06U
 #define DSI_GHCR_DT_Pos             0U
 #define DSI_GHCR_DT_Msk             (0x3FUL << DSI_GHCR_DT_Pos)
 #define DSI_GHCR_VCID_Pos           6U
@@ -534,6 +543,45 @@ static int dsi_long_write(uint8_t cmd, const uint8_t *params, uint32_t nparams)
         g_dsi_trace_seq++;
     }
 #endif
+    return 0;
+}
+
+/* DCS short read (e.g. Read Display Power Mode, Read Display ID): every
+ * verification this session has done up to this point was transmit-only.
+ * This is a genuine two-way test -- if the panel answers with sane data,
+ * the link is electrically healthy end to end (including the reverse/LP
+ * direction and turn-around timing, none of which a write-only trace can
+ * exercise); if it times out or returns garbage, that points squarely at
+ * the physical link rather than anything host-side register content
+ * could ever show. Algorithm matches ST's real HAL_DSI_Read()
+ * (stm32f7xx_hal_dsi.c), verified against the actual vendored source
+ * rather than assumed. */
+static int dsi_dcs_read(uint8_t cmd, uint8_t *out, uint32_t nbytes)
+{
+    if (dsi_wait_cmd_fifo_empty() < 0)
+        return -1;
+
+    DSI->GHCR = (DSI_DCS_SHORT_READ << DSI_GHCR_DT_Pos) |
+                (0U << DSI_GHCR_VCID_Pos) |
+                ((uint32_t)cmd << DSI_GHCR_WCLSB_Pos) |
+                (0U << DSI_GHCR_WCMSB_Pos);
+
+    uint32_t remaining = nbytes;
+    uint8_t *p = out;
+    uint32_t timeout = 1000000U;
+    while (remaining > 0U) {
+        if (!(DSI->GPSR & DSI_GPSR_PRDFE_Msk)) {
+            uint32_t word = DSI->GPDR;
+            uint32_t nb = (remaining < 4U) ? remaining : 4U;
+            for (uint32_t i = 0; i < nb; i++) {
+                p[i] = (uint8_t)(word >> (8U * i));
+            }
+            p += nb;
+            remaining -= nb;
+        }
+        if (--timeout == 0U)
+            return -1;
+    }
     return 0;
 }
 
@@ -1077,6 +1125,24 @@ void hal_display_init(void)
     if (otm_ret < 0)
         return;
 
+    /* Read Display Power Mode (MIPI DCS 0x0A, 1-byte response) as a
+     * genuine bidirectional link check -- everything verified so far was
+     * transmit-only. A sane, non-zero reply (bit2=1 confirms Display On;
+     * see the loop below) means the reverse/LP-turnaround path is
+     * electrically healthy end to end, not just the forward direction a
+     * write-only trace could ever confirm. */
+    {
+        uint8_t power_mode = 0;
+        if (dsi_dcs_read(0x0AU, &power_mode, 1U) == 0) {
+            char buf[48];
+            snprintf(buf, sizeof(buf), "[DISP] power mode read: 0x%02x\r\n",
+                     power_mode);
+            hal_uart_puts(buf);
+        } else {
+            hal_uart_puts("[DISP] power mode read: TIMEOUT\r\n");
+        }
+    }
+
     hal_display_backlight_on();
     hal_uart_puts("[DISP] backlight on\r\n");
 }
@@ -1084,6 +1150,11 @@ void hal_display_init(void)
 uint32_t hal_display_fb_addr(void)
 {
     return g_fb_addr;
+}
+
+int hal_display_read_power_mode(uint8_t *out)
+{
+    return dsi_dcs_read(0x0AU, out, 1U);
 }
 
 void hal_display_backlight_on(void)
