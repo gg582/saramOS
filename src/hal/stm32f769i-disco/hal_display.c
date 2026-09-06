@@ -377,15 +377,31 @@ static uint32_t g_fb_addr = 0;
 /* Minimal busy-wait delays, calibrated for the 216 MHz HCLK configured by
  * hal_system_init() (was 168 MHz; scaled by 216/168 = 1.2857).             */
 /* -------------------------------------------------------------------------- */
+/* Measured against saramos_tick_ms (the real SysTick-driven millisecond
+ * counter) via the [WATCH] diagnostic loop in hal_display_init(): a
+ * nominal disp_delay_ms(50) call was actually taking ~1468ms of real
+ * elapsed time -- a ~29.4x overrun, not the ~1 cycle/iteration the old
+ * "216000 iterations per ms" constant assumed. The `volatile uint32_t i`
+ * loop variable forces a genuine load+store to memory every iteration
+ * (not just a register compare/branch), and at this loop's actual
+ * measured throughput each iteration costs far more than 1 cycle. This
+ * had made every call site using these delays (panel_reset()'s
+ * 10/20ms-class pulses, otm8009a_init()'s 10ms/10ms/120ms wake delays,
+ * disp_clock_init()'s PLL-lock polling) run ~29x longer in real time
+ * than the source intended, though not incorrectly (nothing here was
+ * timing-sensitive on the *short* side -- these are minimums, not
+ * windows -- so it never broke protocol correctness, just made every
+ * display bring-up dramatically slower than the numbers in this file
+ * suggest at a glance). Recalibrated: 216000 / (1468/50) = ~7357. */
 static void disp_delay_ms(uint32_t ms)
 {
-    for (volatile uint32_t i = 0; i < (216000U * ms); i++)
+    for (volatile uint32_t i = 0; i < (7357U * ms); i++)
         ;
 }
 
 static void disp_delay_us(uint32_t us)
 {
-    for (volatile uint32_t i = 0; i < (216U * us); i++)
+    for (volatile uint32_t i = 0; i < (8U * us); i++)
         ;
 }
 
