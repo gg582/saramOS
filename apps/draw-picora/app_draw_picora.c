@@ -86,12 +86,15 @@ static inline uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
 
 /* Matches the original's setup_background(screen, 0x3A3B3C). */
 static uint16_t g_bg_color;
+static uint16_t g_bg_color_base; /* the above, before any STATE_CLEAR invert */
 
 /* ---------------------------------------------------------------------
- * State machine -- a straight port of execute_system_action() in the
- * original main.c, minus the LVGL object calls (replaced by tracking
- * "which sprite, what offset, hidden or not" and redrawing the whole
- * frame each time instead of moving an lv_obj_t).
+ * State machine -- a port of execute_system_action() in the original
+ * main.c, minus the LVGL object calls (replaced by tracking "which
+ * sprite, what offset" and redrawing the whole frame each time instead
+ * of moving an lv_obj_t). One deliberate behavior change from the
+ * original, per its author: STATE_CLEAR inverts the background color
+ * instead of hiding the sprite -- see execute_system_action() below.
  * ------------------------------------------------------------------- */
 typedef enum {
     STATE_MOVE_UP,
@@ -107,7 +110,6 @@ static system_state_t g_current_action = STATE_MOVE_UP;
 static const picora_img_t *g_cur_img;
 static int16_t g_off_x = 0;
 static int16_t g_off_y = 0;
-static int g_hidden = 0;
 
 static picora_img_t g_img_src, g_img_parent, g_img_brown;
 
@@ -139,7 +141,7 @@ static void redraw(void)
     for (uint32_t i = 0; i < (uint32_t)DISPLAY_WIDTH * DISPLAY_HEIGHT; i++)
         fb[i] = g_bg_color;
 
-    if (!g_hidden && g_cur_img && g_cur_img->map) {
+    if (g_cur_img && g_cur_img->map) {
         x0 = ((int32_t)DISPLAY_WIDTH  - (int32_t)g_cur_img->w) / 2 + g_off_x;
         y0 = ((int32_t)DISPLAY_HEIGHT - (int32_t)g_cur_img->h) / 2 + g_off_y;
 
@@ -187,10 +189,14 @@ static void execute_system_action(void)
         g_off_x += 20;
         break;
     case STATE_CLEAR:
-        g_hidden = 1;
+        /* Author's call: invert the background instead of hiding the
+         * sprite (the original Zephyr source's STATE_CLEAR did hide
+         * it -- author confirmed this replacement here). Bitwise NOT
+         * on RGB565 gives the complementary color per channel. */
+        g_bg_color = (uint16_t)~g_bg_color;
         break;
     case STATE_RESTORE:
-        g_hidden = 0;
+        g_bg_color = g_bg_color_base;
         g_cur_img = &g_img_src;
         g_off_x = 0;
         g_off_y = 0;
@@ -199,8 +205,7 @@ static void execute_system_action(void)
         break;
     }
 
-    if (!g_hidden)
-        clamp_offsets(g_cur_img);
+    clamp_offsets(g_cur_img);
 
     g_current_action = (system_state_t)((g_current_action + 1) % STATE_COUNT);
     redraw();
@@ -248,7 +253,8 @@ static void cli_picora(const char *arg)
         return;
     }
 
-    g_bg_color = rgb565(0x3A, 0x3B, 0x3C);
+    g_bg_color_base = rgb565(0x3A, 0x3B, 0x3C);
+    g_bg_color = g_bg_color_base;
 
     g_img_src.map = picora_src_map;    g_img_src.w = picora_src_w;    g_img_src.h = picora_src_h;
     g_img_parent.map = picora_parent_map; g_img_parent.w = picora_parent_w; g_img_parent.h = picora_parent_h;
@@ -257,7 +263,6 @@ static void cli_picora(const char *arg)
     g_cur_img = &g_img_src;
     g_off_x = 0;
     g_off_y = 0;
-    g_hidden = 0;
     g_current_action = STATE_MOVE_UP;
 
     hal_gpio_init_input(BUTTON_PORT, BUTTON_PIN, GPIO_PUPD_DOWN);
