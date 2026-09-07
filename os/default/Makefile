@@ -18,6 +18,11 @@ HAL_SRC := $(HAL_DIR)/hal_uart.c $(HAL_DIR)/hal_sys.c \
 # Extra display/SDRAM/LVGL port sources for the graphical-shell app.
 GFX_HAL_SRC := $(HAL_DIR)/hal_sdram.c $(HAL_DIR)/hal_display.c $(HAL_DIR)/lvgl_port.c
 
+# Display/SDRAM sources only (no LVGL) for apps that draw straight into
+# the framebuffer without a console/widget layer -- e.g. colored-screen's
+# solid-color DSI/LTDC diagnostic.
+DISPLAY_ONLY_HAL_SRC := $(HAL_DIR)/hal_sdram.c $(HAL_DIR)/hal_display.c
+
 LVGL_DIR := $(ROOT_DIR)/third_party/lvgl
 LVGL_SRC := $(LVGL_DIR)/src/lvgl.c \
             $(LVGL_DIR)/src/misc/lv_style.c \
@@ -121,6 +126,13 @@ APP_SRC += $(EXTRA_APP_SRCS)
 ifeq ($(findstring app_graphical_shell.c,$(EXTRA_APP_SRCS)),app_graphical_shell.c)
 HAL_SRC += $(GFX_HAL_SRC)
 APP_SRC += $(LVGL_SRC)
+CFLAGS_EXTRA += -DENABLE_GRAPHICAL_SHELL=1
+endif
+
+# colored-screen needs the display/SDRAM HAL (hal_display_init() etc.)
+# but not LVGL -- it draws solid colors straight into the framebuffer.
+ifeq ($(findstring app_colored_screen.c,$(EXTRA_APP_SRCS)),app_colored_screen.c)
+HAL_SRC += $(DISPLAY_ONLY_HAL_SRC)
 CFLAGS_EXTRA += -DENABLE_GRAPHICAL_SHELL=1
 endif
 

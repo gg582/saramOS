@@ -45,6 +45,20 @@ void hal_display_start_video(void);
 /* Return the configured framebuffer address (in SDRAM). */
 uint32_t hal_display_fb_addr(void);
 
+/* Point LTDC Layer 1's framebuffer at fb_addr, glitch-free: the switch
+ * itself only takes effect at the LTDC's next vertical blanking period
+ * (hardware-synchronized via LTDC_SRCR's Vertical Blanking Reload bit),
+ * never mid-frame. Callers that redraw into the framebuffer after
+ * hal_display_start_video() has already been called -- unlike a
+ * one-shot draw-then-start-video sequence -- should maintain two
+ * buffers, render each new frame into whichever one is NOT currently
+ * displayed, and call this with that buffer's address once the render
+ * is finished, instead of writing into the live, currently-scanned-out
+ * buffer directly (the tearing race hal_display_init()/
+ * hal_display_start_video()'s split avoids for the very first frame,
+ * recurring on every later redraw otherwise). */
+void hal_display_flip(uint32_t fb_addr);
+
 /* Turn backlight on/off. */
 void hal_display_backlight_on(void);
 void hal_display_backlight_off(void);

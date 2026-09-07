@@ -338,6 +338,7 @@ typedef struct {
 #define LTDC_GCR_PCPOL_Pos      28U
 #define LTDC_GCR_PCPOL_Msk      (1U << LTDC_GCR_PCPOL_Pos)
 #define LTDC_SRCR_IMR           (1U << 0)
+#define LTDC_SRCR_VBR           (1U << 1)
 #define LTDC_LAYER_CR_LEN       (1U << 0)
 #define LTDC_PIXEL_FORMAT_RGB565 0x00000002U
 #define LTDC_ISR_LIF_Pos        0U
@@ -346,6 +347,18 @@ typedef struct {
 #define LTDC_ICR_CLIF_Msk       (1U << LTDC_ICR_CLIF_Pos)
 #define LTDC_IER_LIE_Pos        0U
 #define LTDC_IER_LIE_Msk        (1U << LTDC_IER_LIE_Pos)
+#define LTDC_ISR_FUIF_Pos       1U
+#define LTDC_ISR_FUIF_Msk       (1U << LTDC_ISR_FUIF_Pos)
+#define LTDC_ISR_TERRIF_Pos     2U
+#define LTDC_ISR_TERRIF_Msk     (1U << LTDC_ISR_TERRIF_Pos)
+#define LTDC_ICR_CFUIF_Pos      1U
+#define LTDC_ICR_CFUIF_Msk      (1U << LTDC_ICR_CFUIF_Pos)
+#define LTDC_ICR_CTERRIF_Pos    2U
+#define LTDC_ICR_CTERRIF_Msk    (1U << LTDC_ICR_CTERRIF_Pos)
+#define LTDC_IER_FUIE_Pos       1U
+#define LTDC_IER_FUIE_Msk       (1U << LTDC_IER_FUIE_Pos)
+#define LTDC_IER_TERRIE_Pos     2U
+#define LTDC_IER_TERRIE_Msk     (1U << LTDC_IER_TERRIE_Pos)
 
 /* --- OTM8009A commands --- */
 #define OTM8009A_CMD_NOP        0x00U
@@ -835,6 +848,16 @@ static int otm8009a_init(void)
      * shown to be clean -- zero ISR errors, correct framebuffer
      * content, backlight GPIO genuinely driven high). */
     ret += otm8009a_write_reg(OTM8009A_CMD_WRDISBV, &short_reg_data[39], 1);
+    /* Tried clearing WRCTRLD entirely (BCTRL/DD/BL all off, 0x00) after
+     * a stripetest run (a single 40px-wide white stripe against an
+     * otherwise all-black screen) showed the whole screen going full
+     * white regardless of the stripe's position -- on the theory that
+     * DD (Display Dimming) applies its own content-based boosting
+     * independent of the WRCABC mode selector. Measured on hardware:
+     * worse, not better -- nothing displayed at all, not even the
+     * stripe, suggesting BL (bit2) is a basic display-output enable
+     * this panel actually needs, not purely a "content-adaptive" extra.
+     * Reverted to the original ST BSP value (0x2C). */
     ret += otm8009a_write_reg(OTM8009A_CMD_WRCTRLD, &short_reg_data[40], 1);
     {
         static const uint8_t wrcabc_off = 0x00U;
@@ -1368,7 +1391,26 @@ void hal_display_start_video(void)
     ltdc_init(g_fb_addr); /* enables LTDC (GCR.LTDCEN) inline -- see its
                             * own comment for why, matching real
                             * HAL_LTDC_Init()'s own order. */
-    disp_delay_ms(10U);
+    /* Testing a much longer settle gap here (was 10ms) before DSI ever
+     * starts streaming: a halftest run (solid color fills confined to
+     * one half of the screen, held 12s each) showed TOP/BOTTOM tests
+     * displaying correctly but LEFT/RIGHT tests visibly "creeping" --
+     * starting dim/partial and gradually spreading/brightening across
+     * the WHOLE screen over several seconds, worse than half-brightness
+     * throughout. That specific signature (fine over many frames for a
+     * hard-edged VERTICAL split, drifting for a hard-edged HORIZONTAL
+     * split, accumulating over real time) is consistent with a phase
+     * relationship between LTDC's pixel clock (PLLSAI-derived) and
+     * DSI's byte clock (WRPCR-derived) that needs real analog settle
+     * time to stabilize -- not captured by any register value snapshot,
+     * since register comparisons only show configured frequencies, not
+     * the two clock domains' actual phase alignment at any given
+     * moment. Zephyr's LTDC is started at POST_KERNEL and has had many
+     * seconds to settle by the time its DSI ever attaches; this
+     * driver's earlier 200ms version of this same experiment (see git
+     * history) may simply not have been long enough for an analog PLL
+     * settle process. */
+    disp_delay_ms(3000U);
 
     /* Wait for an actual LTDC frame boundary (the line interrupt at
      * line 0) before enabling WCR.DSIEN, instead of a fixed delay.
@@ -1429,6 +1471,66 @@ void hal_display_start_video(void)
                                      * point mid-frame. */
     disp_delay_ms(10U);
 
+    /* Re-send CASET + PASET + RAMWR here, now that Video Mode is
+     * actually running (as LP commands embedded in the live stream --
+     * the same mechanism the power-mode read below already uses
+     * successfully). otm8009a_init() already sent all three once, but
+     * in Command Mode, before this incarnation ever transitioned to
+     * Video Mode.
+     *
+     * Every static register this driver configures (DSI Host, DSI
+     * Wrapper, LTDC, RCC clock tree, FMC/SDRAM timing) has now been
+     * cross-checked byte-for-byte against a live, verified-stable
+     * Zephyr run on this exact board -- zero discrepancies remain, and
+     * double buffering (see lvgl_port.c/lvgl.c) ruled out any redraw/
+     * tearing race by construction. Yet the picture consistently comes
+     * out with the drawn image's own real, correct colors but
+     * positionally scrambled into bands -- for "picture" (a single
+     * static draw, no redraw at all, so no timing race is even
+     * possible there) just as much as for gfxshell. Since content is
+     * right and every host-side register matches, what is left is the
+     * *panel's own* internal state: CASET/PASET define the GRAM
+     * write-window OTM8009A applies incoming pixel data to, and RAMWR
+     * is what tells it "start applying pixel data to that window from
+     * (0,0)". They were all sent once, in Command Mode, before this
+     * incarnation ever entered Video Mode -- re-sending them now, right
+     * as Video Mode actually starts, tests whether the panel's write-
+     * window/pointer needs a fresh reset at that specific transition
+     * rather than carrying over correctly from the Command Mode
+     * session. */
+    {
+        static const uint8_t caset_landscape[] = {0x00, 0x00, 0x03, 0x1FU};
+        static const uint8_t paset_landscape[] = {0x00, 0x00, 0x01, 0xDFU};
+        (void)otm8009a_write_reg(OTM8009A_CMD_CASET, caset_landscape, sizeof(caset_landscape));
+        (void)otm8009a_write_reg(OTM8009A_CMD_PASET, paset_landscape, sizeof(paset_landscape));
+        {
+            uint8_t ramwr_param = 0x00U;
+            (void)otm8009a_write_reg(OTM8009A_CMD_RAMWR, &ramwr_param, 0U);
+        }
+    }
+
+    /* LTDC->ISR.LIF turned out to need IER.LIE set to latch at all --
+     * confirmed above -- despite the peripheral demonstrably meeting the
+     * condition it reports on (LIF never latched even while CPSR was
+     * shown live-varying, i.e. genuinely scanning). ISR.FUIF (FIFO
+     * Underrun) and ISR.TERRIF (Transfer Error) are strong suspects for
+     * the same behavior: if so, EVERY earlier "LTDC->ISR == 0, no
+     * errors" check this whole investigation was a false negative that
+     * could have been masking a real, periodic FIFO underrun the entire
+     * time -- e.g. the LTDC's SDRAM read requests occasionally losing
+     * an AHB bus arbitration to saramOS's own SysTick/scheduler
+     * activity (a 1ms SysTick with interrupts globally enabled, no
+     * defined interrupt priorities, unlike Zephyr) -- which would show
+     * up on screen as exactly this driver's repeated symptom: a picture
+     * built from real, correct pixel data but positionally scrambled
+     * into bands, since a dropped/stalled FIFO read desyncs the LTDC's
+     * pixel counter from its actual SDRAM read position for the rest of
+     * that frame. Enabling these now, purely to make the status flags
+     * usable for the poll below -- NVIC is never touched for LTDC, so
+     * this cannot cause an actual interrupt entry. */
+    LTDC->ICR = LTDC_ICR_CFUIF_Msk | LTDC_ICR_CTERRIF_Msk;
+    LTDC->IER |= LTDC_IER_FUIE_Msk | LTDC_IER_TERRIE_Msk;
+
     hal_display_backlight_on();
     hal_uart_puts("[DISP] backlight on\r\n");
 
@@ -1437,25 +1539,55 @@ void hal_display_start_video(void)
      * after this window's changes -- most recently as "color bands that
      * appear then extinguish" (a Zephyr-confirmed-good picture stays
      * stable indefinitely on this exact hardware, so this fade is a real
-     * saramOS-side defect). Poll DSI->ISR0/ISR1 (real, read-to-clear
-     * error flags -- see dsi_wait_cmd_fifo_empty()'s comment for why
-     * these, not visual symptoms, are the trustworthy signal) every
-     * ~100ms for two seconds right after backlight-on, printing any
-     * flags seen, to catch whatever hardware error correlates with the
-     * moment the picture actually fades. */
+     * saramOS-side defect). Poll DSI->ISR0/ISR1 and (now) LTDC->ISR's
+     * FUIF/TERRIF (real, read-to-clear error flags -- see
+     * dsi_wait_cmd_fifo_empty()'s comment for why these, not visual
+     * symptoms, are the trustworthy signal) every ~100ms for two seconds
+     * right after backlight-on, printing any flags seen, to catch
+     * whatever hardware error correlates with the moment the picture
+     * actually fades/bands. */
     for (uint32_t i = 0; i < 20U; i++) {
         disp_delay_ms(100U);
         uint32_t isr0 = DSI->ISR[0];
         uint32_t isr1 = DSI->ISR[1];
-        if (isr0 != 0U || isr1 != 0U) {
-            char buf[80];
-            snprintf(buf, sizeof(buf), "[DISP] t=%lums ISR0=%08lx ISR1=%08lx\r\n",
+        uint32_t ltdc_isr = LTDC->ISR & (LTDC_ISR_FUIF_Msk | LTDC_ISR_TERRIF_Msk);
+        if (isr0 != 0U || isr1 != 0U || ltdc_isr != 0U) {
+            char buf[96];
+            snprintf(buf, sizeof(buf), "[DISP] t=%lums ISR0=%08lx ISR1=%08lx LTDC_ISR=%08lx\r\n",
                      (unsigned long)(i + 1U) * 100UL,
-                     (unsigned long)isr0, (unsigned long)isr1);
+                     (unsigned long)isr0, (unsigned long)isr1, (unsigned long)ltdc_isr);
             hal_uart_puts(buf);
         }
+        LTDC->ICR = LTDC_ICR_CFUIF_Msk | LTDC_ICR_CTERRIF_Msk;
     }
     hal_uart_puts("[DISP] isr poll done\r\n");
+}
+
+/* Point LTDC Layer 1 at a different framebuffer address, taking effect
+ * only at the LTDC's own next vertical blanking period (LTDC_SRCR_VBR
+ * -- Vertical Blanking Reload -- instead of LTDC_SRCR_IMR's immediate
+ * reload). This is the real fix for tearing on redraw, replacing an
+ * earlier version of this function that busy-waited for
+ * LTDC->ISR.LIF (see hal_display_start_video()'s comment for why
+ * IER.LIE has to be set for that flag to latch at all) and then wrote
+ * CFBAR immediately: even confined to the blanking window that way, the
+ * actual REDRAW (this port's minimal LVGL walking every glyph pixel via
+ * put_pixel(), or any full-buffer rewrite) still commonly takes longer
+ * than the blanking window itself to complete, so a live buffer could
+ * still be caught mid-redraw regardless of when the wait released.
+ *
+ * The real fix is double buffering: render into a buffer that is NOT
+ * the one currently being scanned out at all (as long as rendering
+ * takes), then hand this function the finished buffer's address --
+ * VBR guarantees the switch itself only ever happens between frames,
+ * so scan-out is always reading one complete, finished buffer or the
+ * other, never a buffer mid-write. See lvgl_port.c for the two-buffer
+ * setup and lv_timer_handler() (lvgl.c) for the alternation between
+ * them on every redraw. */
+void hal_display_flip(uint32_t fb_addr)
+{
+    LTDC_LAYER1->CFBAR = fb_addr;
+    LTDC->SRCR = LTDC_SRCR_VBR;
 }
 
 uint32_t hal_display_fb_addr(void)

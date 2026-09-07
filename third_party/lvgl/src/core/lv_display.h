@@ -42,6 +42,13 @@ typedef struct _lv_display_t {
     lv_display_render_mode_t render_mode;
     uint32_t flushing : 1;
     uint32_t flushing_last : 1;
+    uint32_t render_buf2_active : 1; /* which of draw_buf1/draw_buf2 was
+                                       * rendered into most recently --
+                                       * toggled each lv_timer_handler()
+                                       * call when draw_buf2 is set, so
+                                       * each redraw goes into whichever
+                                       * buffer is NOT the one currently
+                                       * flipped onto screen. */
     lv_layer_t layer_bottom;
     struct _lv_obj_t *screen;
 } lv_display_t;

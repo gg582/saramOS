@@ -127,11 +127,21 @@ static void cli_gfxshell(const char *arg)
  * -------------------------------------------------------------------------- */
 static volatile uint8_t g_picture_display_ready = 0;
 
+/* Compensating channel rotation -- see apps/colored-screen/
+ * app_colored_screen.c's rgb565() for the full diagnosis: a solid-color
+ * test cycle (Red/Green/Blue/White/Cyan/Magenta/Yellow, one per screen,
+ * held long enough to rule out timing ambiguity) showed this driver's
+ * actual on-screen output is R'=commanded G, G'=commanded B, B'=
+ * commanded R -- exact for all 7 colors (White, whose channels are all
+ * equal, was the one unaffected, which is why draw_house_picture()'s
+ * blended tones never made this obvious across this entire
+ * investigation). Sending (b,r,g) instead of (r,g,b) compensates. */
 static inline uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
 {
-    return (uint16_t)(((uint16_t)(r & 0xF8U) << 8) |
-                       ((uint16_t)(g & 0xFCU) << 3) |
-                       ((uint16_t)(b >> 3)));
+    uint8_t sr = b, sg = r, sb = g;
+    return (uint16_t)(((uint16_t)(sr & 0xF8U) << 8) |
+                       ((uint16_t)(sg & 0xFCU) << 3) |
+                       ((uint16_t)(sb >> 3)));
 }
 
 static inline void gfx_set_pixel(volatile uint16_t *fb, int x, int y, uint16_t color)

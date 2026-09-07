@@ -140,13 +140,20 @@ static void console_flush(void)
         lv_label_set_text(g_console_label, g_text_buf);
 }
 
-/* LV_DISPLAY_RENDER_MODE_DIRECT means lv_timer_handler() already rendered
- * straight into the real framebuffer (see lvgl_port_init() below) -- there
- * is nothing left to copy out, just acknowledge the flush. */
+/* LV_DISPLAY_RENDER_MODE_DIRECT + double buffering (see lvgl_port_init()):
+ * lv_timer_handler() already rendered straight into one of the two real
+ * SDRAM framebuffers (px_map is that buffer's address, passed straight
+ * through by lv_timer_handler() -- see lvgl.c), so there is nothing left
+ * to copy; just point the LTDC at the buffer that was actually just
+ * rendered into. hal_display_flip() defers the actual switch to the
+ * LTDC's own next vertical blanking period (LTDC_SRCR's Vertical
+ * Blanking Reload bit), so this never races the LTDC's live scan-out --
+ * unlike writing directly into whatever buffer is currently on screen,
+ * which is what this used to do back when there was only one buffer. */
 static void lv_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
     (void)area;
-    (void)px_map;
+    hal_display_flip((uint32_t)px_map);
     lv_display_flush_ready(disp);
 }
 
@@ -162,12 +169,26 @@ void lvgl_port_init(void)
 
     lv_display_t *disp = lv_display_get_default();
     lv_display_set_physical_resolution(disp, DISPLAY_WIDTH, DISPLAY_HEIGHT);
-    /* The label draws straight into the SDRAM framebuffer the LTDC scans
-     * out -- render mode DIRECT, no separate copy/flush buffer. */
-    lv_display_set_buffers(disp, (void *)hal_display_fb_addr(), NULL,
-                            (uint32_t)DISPLAY_WIDTH * (uint32_t)DISPLAY_HEIGHT *
-                                (uint32_t)sizeof(uint16_t),
-                            LV_DISPLAY_RENDER_MODE_DIRECT);
+    /* Two real SDRAM buffers, each one full RGB565 frame -- render mode
+     * DIRECT still means LVGL draws straight into one of them with no
+     * separate software copy/flush buffer, but now each redraw goes
+     * into whichever buffer is NOT the one LTDC is currently scanning
+     * out (see lv_timer_handler() in lvgl.c), and lv_flush_cb() below
+     * flips LTDC to the finished buffer only at the next vertical
+     * blanking period. This is what actually fixes tearing/torn output
+     * on every redraw after the first -- a single buffer meant every
+     * redraw wrote directly into the live, actively-scanned memory, no
+     * matter how carefully the write was timed against blanking,
+     * because the write itself commonly takes longer than one blanking
+     * window to finish. buf2 lives right after buf1 in SDRAM; the
+     * board's SDRAM is 16 MB, comfortably more than 2x this display's
+     * ~768 KB frame size. */
+    uint32_t fb_size = (uint32_t)DISPLAY_WIDTH * (uint32_t)DISPLAY_HEIGHT *
+                        (uint32_t)sizeof(uint16_t);
+    uint32_t buf1_addr = hal_display_fb_addr();
+    uint32_t buf2_addr = buf1_addr + fb_size;
+    lv_display_set_buffers(disp, (void *)buf1_addr, (void *)buf2_addr,
+                            fb_size, LV_DISPLAY_RENDER_MODE_DIRECT);
     lv_display_set_flush_cb(disp, lv_flush_cb);
 
     g_console_label = lv_label_create(lv_screen_active());
@@ -211,6 +232,14 @@ void lvgl_port_tick(uint32_t ms)
 uint32_t lvgl_port_handler(void)
 {
     if (g_dirty) {
+        /* Video is already running by the time this fires (unlike the
+         * one-shot draw in cli_picture(), which draws before video
+         * starts). console_flush()/lv_timer_handler() no longer race
+         * this against the LTDC's live scan-out, though -- lv_timer_
+         * handler() now renders into whichever of the two SDRAM buffers
+         * is NOT currently on screen and flips to it only at the next
+         * vertical blanking period; see lvgl_port_init()'s comment and
+         * lv_flush_cb() above for the full double-buffering setup. */
         console_flush();
         lv_timer_handler();
     }
