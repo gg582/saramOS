@@ -137,6 +137,14 @@ HAL_SRC += $(DISPLAY_ONLY_HAL_SRC)
 CFLAGS_EXTRA += -DENABLE_GRAPHICAL_SHELL=1
 endif
 
+# draw-picora needs the display/SDRAM HAL (same as colored-screen -- it
+# draws straight into the framebuffer, no LVGL) plus GPIO (already
+# unconditional via HAL_SRC's hal_gpio.c) for the user button.
+ifeq ($(findstring app_draw_picora.c,$(EXTRA_APP_SRCS)),app_draw_picora.c)
+HAL_SRC += $(DISPLAY_ONLY_HAL_SRC)
+CFLAGS_EXTRA += -DENABLE_GRAPHICAL_SHELL=1
+endif
+
 INCLUDES := -I$(ROOT_DIR)/include \
             -I$(HAL_DIR) \
             -I$(LIBTTAK_DIR)/include \
