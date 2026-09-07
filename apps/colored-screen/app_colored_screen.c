@@ -254,11 +254,54 @@ static void cli_stripetest(const char *arg)
     hal_uart_puts("stripetest: done\r\n");
 }
 
+/* Shows RED-TOP then RED-LEFT, each held 40s (vs. halftest's 12s), back
+ * to back in one run. halftest showed LEFT visibly "spreading"/
+ * strengthening over its 12s hold; this checks whether TOP does the
+ * same thing given enough time (i.e. a universal, purely time-based
+ * drift that is just slower/less noticeable for a vertical split) or
+ * stays flat the whole 40s (i.e. genuinely confined to horizontal
+ * splits, not just slower elsewhere). */
+static void cli_longtest(const char *arg)
+{
+    (void)arg;
+
+    if (!g_colortest_ready) {
+        hal_uart_puts("longtest: init display\r\n");
+        hal_sdram_init();
+        hal_display_init();
+        fill_screen(rgb565(0, 0, 0));
+        hal_display_start_video();
+        g_colortest_ready = 1;
+        hal_uart_puts("longtest: display ready\r\n");
+    }
+
+    hal_uart_puts("longtest: clear\r\n");
+    fill_screen(rgb565(0, 0, 0));
+    delay_ms(3000U);
+
+    hal_uart_puts("longtest: showing RED TOP half (40s)\r\n");
+    fill_rect(0, 0, (int)DISPLAY_WIDTH, (int)DISPLAY_HEIGHT / 2, rgb565(255, 0, 0));
+    delay_ms(40000U);
+
+    hal_uart_puts("longtest: clear\r\n");
+    fill_screen(rgb565(0, 0, 0));
+    delay_ms(3000U);
+
+    hal_uart_puts("longtest: showing RED LEFT half (40s)\r\n");
+    fill_rect(0, 0, (int)DISPLAY_WIDTH / 2, (int)DISPLAY_HEIGHT, rgb565(255, 0, 0));
+    delay_ms(40000U);
+
+    hal_uart_puts("longtest: clear\r\n");
+    fill_screen(rgb565(0, 0, 0));
+    hal_uart_puts("longtest: done\r\n");
+}
+
 void app_register_commands(void)
 {
     extern void cli_register_command(const char *name,
                                      void (*fn)(const char *arg));
     cli_register_command("colortest", cli_colortest);
     cli_register_command("halftest", cli_halftest);
+    cli_register_command("longtest", cli_longtest);
     cli_register_command("stripetest", cli_stripetest);
 }

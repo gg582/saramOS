@@ -923,16 +923,17 @@ static int dsi_host_init(void)
         }
     }
 
-    /* Tried halving this (ODF 0 -> 1, 500 -> 250 Mbps/lane) to test
-     * whether the continuous high-speed video path had a signal-margin
-     * problem the low-power command path (proven robust, including
-     * reads -- see hal_display_read_power_mode()) couldn't reveal.
-     * Measured result: no improvement -- if anything the on-screen
-     * picture was reported as visible for an even shorter moment before
-     * fading, not longer. Reverted to the reference 500 Mbps/lane value
-     * (matches the ST BSP, AN4860, and Zephyr's own driver for this
-     * exact panel) since deviating from it wasn't shown to help and
-     * removes a verified-correct baseline for no benefit. */
+    /* Tried ODF=1 (250 Mbps/lane) instead of 0 (500 Mbps/lane) this
+     * session -- on the theory that halftest's horizontal-split-only
+     * artifact (under-half brightness + spreading on LEFT/RIGHT,
+     * perfectly stable on TOP/BOTTOM even given 40s) was a marginal
+     * source-driver settling-time issue that more per-bit time might
+     * fix. Measured: zero change -- the artifact is bitrate-
+     * independent, ruling out a settling-time-margin explanation
+     * (a genuine settling problem would improve with more time per
+     * bit). This is on top of an earlier, pre-this-session test of the
+     * same halving that also found no improvement. Reverted to the
+     * reference 500 Mbps/lane value (matches ST BSP/AN4860/Zephyr). */
     DSI->WRPCR &= ~(DSI_WRPCR_PLL_NDIV_Msk | DSI_WRPCR_PLL_IDF_Msk | DSI_WRPCR_PLL_ODF_Msk);
     DSI->WRPCR |= (100U << DSI_WRPCR_PLL_NDIV_Pos) |
                   (5U   << DSI_WRPCR_PLL_IDF_Pos)  |
