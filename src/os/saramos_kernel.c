@@ -301,6 +301,68 @@ void saramos_task_yield(void)
     saramos_schedule();
 }
 
+void saramos_task_block_current(void)
+{
+    uint32_t primask = saramos_irq_save();
+    saramos_tcb_t *current = saramos_current_tcb;
+    saramos_tcb_t *next;
+
+    if (current) {
+        /* Unlike saramos_schedule(), current does NOT go back on the
+         * ready list -- it stays off it (BLOCKED) until some other
+         * context calls saramos_task_unblock() on it. */
+        current->state = SARAMOS_TASK_BLOCKED;
+        ready_remove_locked(current);
+    }
+
+    next = pick_next_locked();
+    if (next) {
+        ready_remove_locked(next);
+        next->state = SARAMOS_TASK_RUNNING;
+        saramos_next_tcb = next;
+        *saramos_icsr = SARAMOS_ICSR_PENDSVSET;
+        saramos_barrier();
+    }
+    /* If there is no other ready task, PendSV is not triggered and
+     * saramos_current_tcb keeps pointing at the now-blocked task until
+     * someone unblocks it (or another task becomes ready and its own
+     * saramos_schedule()/interrupt-driven path picks it up) -- this
+     * mirrors saramos_schedule()'s own behavior when pick_next_locked()
+     * finds nothing (callers are expected to only block when forward
+     * progress is otherwise possible, same as any RTOS). */
+
+    saramos_irq_restore(primask);
+}
+
+void saramos_task_unblock(saramos_tcb_t *tcb)
+{
+    uint32_t primask = saramos_irq_save();
+
+    if (tcb && tcb->state == SARAMOS_TASK_BLOCKED) {
+        tcb->state = SARAMOS_TASK_READY;
+        ready_insert_locked(tcb);
+    }
+
+    saramos_irq_restore(primask);
+}
+
+void saramos_task_set_priority(saramos_tcb_t *tcb, uint8_t priority)
+{
+    uint32_t primask = saramos_irq_save();
+
+    if (tcb) {
+        bool was_ready = ready_contains_locked(tcb);
+
+        if (was_ready)
+            ready_remove_locked(tcb);
+        tcb->priority = priority;
+        if (was_ready)
+            ready_insert_locked(tcb);
+    }
+
+    saramos_irq_restore(primask);
+}
+
 void saramos_task_exit(void)
 {
     saramos_tcb_t *self = saramos_current_tcb;

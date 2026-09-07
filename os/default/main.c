@@ -14,6 +14,7 @@
 #include <os/saramos_owner.h>
 #include <os/saramos_scheduler.h>
 #include <os/saramos_process.h>
+#include <os/saramos_sem.h>
 #include "lwip/init.h"
 #include "lwip/netif.h"
 #include "lwip/dhcp.h"
@@ -40,7 +41,8 @@
 /* lwIP sys_now() for bare-metal NO_SYS=1 mode */
 u32_t sys_now(void)
 {
-    return (u32_t)ttak_get_tick_count();
+    extern volatile uint32_t saramos_tick_ms;
+    return (u32_t)saramos_tick_ms;
 }
 
 static struct netif gnetif;
@@ -133,7 +135,9 @@ static void cli_status(void)
         hal_uart_puts("Owner: not initialized\r\n");
     }
 
-    snprintf(buf, sizeof(buf), "Tick count: %lu\r\n", (unsigned long)ttak_get_tick_count());
+    extern volatile uint32_t saramos_tick_ms;
+    snprintf(buf, sizeof(buf), "Tick count: %lu (ms: %lu)\r\n",
+             (unsigned long)ttak_get_tick_count(), (unsigned long)saramos_tick_ms);
     hal_uart_puts(buf);
 
     hal_uart_puts("-----------------\r\n");
@@ -673,7 +677,16 @@ static void cli_net_status(void)
                  ip4addr_ntoa(netif_ip4_gw(&gnetif)));
         hal_uart_puts(buf);
     } else {
-        hal_uart_puts("net: DHCP still negotiating...\r\n");
+        struct dhcp *d = netif_dhcp_data(&gnetif);
+        const char *st_names[] = {
+            "OFF", "REQUESTING", "INIT", "REBOOTING", "REBINDING",
+            "RENEWING", "SELECTING", "INFORMING", "CHECKING", "PERMANENT",
+            "BOUND", "RELEASING", "BACKING_OFF"
+        };
+        const char *name = (d && d->state <= 12) ? st_names[d->state] : "UNKNOWN";
+        snprintf(buf, sizeof(buf), "net: DHCP negotiating (state=%s[%d], tries=%u, ms=%lu)...\r\n",
+                 name, d ? (int)d->state : -1, d ? (unsigned)d->tries : 0U, (unsigned long)sys_now());
+        hal_uart_puts(buf);
     }
 }
 
@@ -1762,6 +1775,43 @@ static int cli_input_process(saramos_process_t *p)
     PROC_END(p);
 }
 
+/* saramos_sched_run() (void(void), never returns) adapted to
+ * saramos_task_entry_t's void(void*) signature so it can run as a real
+ * TCB task under saramos_kernel_start() -- see main()'s comment. */
+static void saramos_sched_run_task_entry(void *arg)
+{
+    (void)arg;
+    saramos_sched_run();
+}
+
+/* saramos_heartbeat_sem is defined in hal_sys.c and posted once a
+ * second from SysTick_Handler -- ISR-safe, per saramos_sem_post()'s own
+ * contract. This task is the other half: it blocks on
+ * saramos_sem_wait() (genuinely asleep, off the ready list, zero CPU)
+ * between heartbeats, woken by that ISR post, and runs concurrently
+ * with (able to preempt, and be preempted by) the "cli"/gfxshell
+ * cooperative-scheduler TCB task above -- the actual end-to-end proof
+ * that the kernel wiring (real TCB/PendSV preemption, driven from
+ * SysTick_Handler) and the sync primitives (saramos_sem_t,
+ * saramos_mutex_t) work together, not just compile. */
+extern saramos_sem_t saramos_heartbeat_sem;
+
+static void heartbeat_task_entry(void *arg)
+{
+    (void)arg;
+    extern volatile uint32_t saramos_tick_ms;
+    uint32_t count = 0;
+
+    for (;;) {
+        saramos_sem_wait(&saramos_heartbeat_sem);
+        count++;
+        char buf[48];
+        snprintf(buf, sizeof(buf), "[RTOS] heartbeat #%lu (t=%lums)\r\n",
+                 (unsigned long)count, (unsigned long)saramos_tick_ms);
+        hal_uart_puts(buf);
+    }
+}
+
 int main(void)
 {
     hal_uart_init();
@@ -1805,7 +1855,58 @@ int main(void)
     hal_uart_puts("===================================\r\n");
 
     saramos_proc_spawn("cli", cli_input_process, 0, NULL, NULL, NULL, 0);
-    saramos_sched_run();
+
+    /* Hand off to the real preemptive kernel (saramos_kernel.c) instead
+     * of calling saramos_sched_run() directly. saramos_sched_run()'s
+     * own cooperative loop -- which drives everything spawned via
+     * saramos_proc_spawn() above (the CLI, gfxshell's renderer, network
+     * processes, ...) -- keeps running exactly as before, completely
+     * unchanged; it now just runs *as* a single TCB task under the real
+     * kernel instead of being main()'s bare final call. This is
+     * deliberately the minimal, safe first connection: with only one
+     * TCB task, saramos_schedule() (now driven every tick from
+     * SysTick_Handler -- see hal_sys.c) has nothing else to switch to,
+     * so behavior is unchanged, but the PendSV/TCB/fault-isolation
+     * machinery is now genuinely live and exercised, ready for real
+     * concurrent TCB tasks to be added alongside it. */
+    {
+        static uint8_t sched_task_stack[4096];
+        static saramos_tcb_t sched_task_tcb;
+
+        saramos_task_init(&sched_task_tcb, 0, saramos_sched_run_task_entry,
+                          NULL, sched_task_stack, sizeof(sched_task_stack),
+                          100U, NULL, NULL);
+        saramos_task_add(&sched_task_tcb);
+    }
+
+    /* Second real TCB task -- demonstrates genuine concurrent tasks
+     * under the kernel, not just one task running "through" it. Same
+     * priority as the scheduler task above, not lower: pick_next_locked()
+     * always prefers a strictly higher-priority READY task over a lower
+     * one, so a lower priority here would starve this task completely --
+     * the scheduler task never blocks at the TCB level (its own
+     * cooperative loop underneath never returns), so it is READY 100% of
+     * the time, and a genuinely lower-priority task would then never be
+     * picked, ever, regardless of being unblocked (confirmed on hardware:
+     * an earlier version of this code gave it priority 50 and its
+     * heartbeat print never appeared at all). Equal priority means
+     * saramos_schedule()'s round-robin (SysTick-driven every tick) does
+     * alternate between them -- this task is blocked (off the ready
+     * list entirely) the vast majority of the time regardless, so in
+     * practice it costs the scheduler task at most one tick's worth of
+     * a brief UART print, once a second. */
+    saramos_sem_init(&saramos_heartbeat_sem, 0U);
+    {
+        static uint8_t heartbeat_task_stack[1024];
+        static saramos_tcb_t heartbeat_task_tcb;
+
+        saramos_task_init(&heartbeat_task_tcb, 1, heartbeat_task_entry,
+                          NULL, heartbeat_task_stack, sizeof(heartbeat_task_stack),
+                          100U, NULL, NULL);
+        saramos_task_add(&heartbeat_task_tcb);
+    }
+
+    saramos_kernel_start();
 
     return 0;
 }

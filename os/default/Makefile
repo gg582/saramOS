@@ -41,7 +41,8 @@ OS_DIR := $(ROOT_DIR)/src/os
 OS_SRC := $(OS_DIR)/saramos_arena.c $(OS_DIR)/saramos_owner.c \
           $(OS_DIR)/saramos_kernel.c $(OS_DIR)/saramos_context.S \
           $(OS_DIR)/saramos_process.c $(OS_DIR)/saramos_scheduler.c \
-          $(OS_DIR)/saramos_pipe.c
+          $(OS_DIR)/saramos_pipe.c $(OS_DIR)/saramos_mutex.c \
+          $(OS_DIR)/saramos_sem.c
 
 LWIP_DIR := $(ROOT_DIR)/third_party/lwip
 LWIP_SRC := $(LWIP_DIR)/src/core/init.c \

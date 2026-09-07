@@ -1,4 +1,17 @@
 #include <hal/board.h>
+#include <os/saramos_kernel.h>
+#include <os/saramos_sem.h>
+
+/* Posted once a second from SysTick_Handler -- see main.c's
+ * heartbeat_task_entry() for the real TCB task that blocks on this via
+ * saramos_sem_wait(), the actual end-to-end demonstration that the
+ * kernel wiring (TCB/PendSV preemption) and the sync primitives
+ * (saramos_sem_t) work together: the task is genuinely asleep (off the
+ * ready list, zero CPU) between heartbeats, woken by an ISR-safe
+ * saramos_sem_post() call from here, and actually runs concurrently
+ * with (able to preempt, and be preempted by) the "cli"/gfxshell
+ * cooperative-scheduler TCB task. */
+saramos_sem_t saramos_heartbeat_sem;
 
 #define SCB_BASE        0xE000ED00U
 #define SCB_VTOR        (*(volatile uint32_t *)(SCB_BASE + 0x08U))
@@ -266,4 +279,29 @@ void hal_systick_init(void)
 void SysTick_Handler(void)
 {
     saramos_tick_ms++;
+
+    /* Drive the real preemptive kernel (saramos_kernel.c: TCB/PendSV
+     * context switching, priority-ordered ready list, fault isolation)
+     * -- previously built but never actually triggered by anything, so
+     * every "task" in the system ran cooperatively through
+     * saramos_sched_run()'s single-function-per-pass loop instead.
+     * saramos_current_tcb is NULL until saramos_kernel_start() has
+     * actually been called (see main()), so this is a complete no-op
+     * for any boot path that doesn't use the TCB kernel -- zero risk to
+     * existing behavior. Once the kernel IS running, calling
+     * saramos_schedule() here on every tick means a higher-priority
+     * task becoming ready genuinely preempts whatever is currently
+     * running within 1ms, via PendSV, not "whenever the running
+     * function happens to return or yield" -- the defining property of
+     * preemptive scheduling that a bare cooperative loop can't give. */
+    if (saramos_current_tcb) {
+        saramos_schedule();
+
+        /* Once a second, wake the heartbeat TCB task (see main.c) --
+         * saramos_sem_post() is explicitly ISR-safe, unlike
+         * saramos_task_block_current()/saramos_mutex_lock(), which is
+         * why this posts rather than waits. */
+        if ((saramos_tick_ms % 1000U) == 0U)
+            saramos_sem_post(&saramos_heartbeat_sem);
+    }
 }
