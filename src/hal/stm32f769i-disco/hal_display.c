@@ -10,6 +10,38 @@
  *   - HSE (25 MHz crystal) is enabled to clock the DSI PLL and PLLSAI.
  *   - DSI PLL: 25 MHz / 5 * 100 / 1 = 500 MHz -> byte clock = 62.5 MHz.
  *   - PLLSAI: 25 MHz / 25 * 384 / 7 / 2 = 27.429 MHz -> LTDC pixel clock.
+ *
+ * KNOWN REMAINING ISSUE (as of this comment): apps/colored-screen's
+ * halftest command (solid-color fill confined to one half of the
+ * screen, rest black) shows TOP/BOTTOM halves displaying correctly,
+ * but LEFT/RIGHT halves coming in under half brightness and visibly
+ * spreading across the whole screen over several seconds, with an
+ * asymmetric bias (LEFT test strengthens near the top, RIGHT test
+ * strengthens near the bottom). Confirmed via longtest (40s holds):
+ * TOP is perfectly stable the whole time; LEFT reproduces the same
+ * spreading -- so this is specifically tied to horizontal (per-line)
+ * color transitions, not a general time-based drift. Confirmed
+ * bitrate-independent (tested at 250 Mbps/lane, no change) -- rules
+ * out a source-driver settling-time-margin explanation.
+ *
+ * Exhaustively cross-checked against a live, verified-stable Zephyr
+ * run on this exact board and confirmed byte-for-byte IDENTICAL:
+ * every DSI Host video-timing/config register (MCR, VMCR, VPCR, VCCR,
+ * VNPCR, VHSACR, VHBPCR, VLCR, VVSACR, VVBPCR, VVFPCR, VVACR, LPMCR,
+ * CCR, CLCR, LCOLCR, PCR -- full value, not just BTAE), the DSI
+ * Wrapper (WCFGR, WPCR[0-4], WRPCR), every DSI "Current Configuration"
+ * shadow register (VSCR.EN=0 on both, confirming these are genuinely
+ * inactive rather than holding a stale/different value), every LTDC
+ * register (SSCR/BPCR/AWCR/TWCR/GCR/BFCR/CFBAR/CFBLR and the layer
+ * window registers), the RCC clock tree (main PLL and PLLSAI, both
+ * enable+ready bits and the N/R/DIVR dividers), and FMC/SDRAM Bank 1
+ * timing (SDCR1/SDTR1/SDRTR -- Bank 2 is unpopulated on this board and
+ * correctly left unconfigured on both). Framebuffer content was
+ * independently verified correct via direct SDRAM reads. If picking
+ * this back up: register-level comparison against Zephyr is exhausted
+ * for now -- the next useful lever is likely either real hardware
+ * instrumentation (logic analyzer/scope on the DSI lanes) or a
+ * different physical MB1166 unit, not another register audit.
  */
 #include "hal_display.h"
 #include "hal_sdram.h"
@@ -93,7 +125,17 @@ typedef struct {
     uint32_t      RESERVED2[3];
     volatile uint32_t FIR[2];
     uint32_t      RESERVED3[8];
-    volatile uint32_t VSCR;
+    volatile uint32_t VSCR; /* Video Shadow Control -- live-checked
+                              * (both this driver and a known-good
+                              * Zephyr run): EN=0, i.e. shadow mode is
+                              * off, so the *CCR "Current Configuration"
+                              * mirrors below (VMCCR etc.) are inactive
+                              * and read 0 -- the live video timing
+                              * genuinely comes straight from VMCR/
+                              * VHSACR/etc., not these. Do not re-chase
+                              * this: it was checked as a candidate for
+                              * halftest's horizontal-only artifact and
+                              * ruled out (matches Zephyr exactly). */
     uint32_t      RESERVED4[2];
     volatile uint32_t LCVCIDR;
     volatile uint32_t LCCCR;
@@ -1007,7 +1049,12 @@ static int dsi_host_init(void)
     DSI->CLCR &= ~(DSI_CLCR_DPCC_Msk | DSI_CLCR_ACR_Msk);
     DSI->CLCR |= DSI_CLCR_DPCC_Msk;
 
-    /* Flow control: BTA enabled so commands can be acknowledged. */
+    /* Flow control: BTA enabled so commands can be acknowledged. Live-
+     * checked in full (not just this one bit): PCR = 0x00000004 on both
+     * this driver and a known-good Zephyr run -- only BTAE set, every
+     * other flow-control bit (ECC/CRC RX, EOTP RX/TX) matches (both
+     * clear). Ruled out as a candidate for halftest's horizontal-only
+     * artifact. */
     DSI->PCR |= DSI_FLOW_CONTROL_BTAE;
 
     /* Real HAL_DSI_Init() (stm32f7xx_hal_dsi.c) disables the DSI Host
