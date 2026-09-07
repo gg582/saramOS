@@ -29,27 +29,17 @@ static void delay_ms(uint32_t ms)
         ;
 }
 
-/* Compensating channel rotation: a colortest run (pure R/G/B/W/C/M/Y
- * fills, one per screen, held long enough to rule out any timing
- * ambiguity) showed the on-screen result is consistently R'=commanded
- * G, G'=commanded B, B'=commanded R -- verified exactly against every
- * one of the 7 colors (White, whose channels are all equal, was the
- * one color unaffected by this, which is why the bug went unnoticed in
- * blended-color content like the house picture or LVGL text/background
- * this entire investigation until a synthetic primary-color test made
- * it unambiguous). Wherever this rotation actually happens (DSI wrapper
- * WCFGR.COLMUX="RGB888" doesn't have an alternate/BGR constant in the
- * real ST HAL either, so it isn't simply the wrong enum value -- see
- * commit message), pre-rotating here compensates for it in software:
- * to make (r,g,b) actually APPEAR as (r,g,b), send (b,r,g) instead, so
- * that the hardware's R'=G_sent/G'=B_sent/B'=R_sent recovers the
- * original color. */
+/* The channel-rotation "bug" this used to compensate for (sending
+ * (b,r,g) instead of (r,g,b)) was diagnosed against a build with a
+ * structural DSI bring-up bug (a missing priming Start/Stop cycle --
+ * see hal_display_start_video()'s comment) still present. With that
+ * real bug fixed, the compensation is no longer needed and actively
+ * wrong -- removed. */
 static inline uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
 {
-    uint8_t sr = b, sg = r, sb = g;
-    return (uint16_t)(((uint16_t)(sr & 0xF8U) << 8) |
-                       ((uint16_t)(sg & 0xFCU) << 3) |
-                       ((uint16_t)(sb >> 3)));
+    return (uint16_t)(((uint16_t)(r & 0xF8U) << 8) |
+                       ((uint16_t)(g & 0xFCU) << 3) |
+                       ((uint16_t)(b >> 3)));
 }
 
 static void fill_screen(uint16_t color)

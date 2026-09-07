@@ -24,21 +24,18 @@ typedef union {
 
 typedef lv_color16_t lv_color_t;
 
-/* Compensating channel rotation -- see apps/colored-screen/
- * app_colored_screen.c's rgb565() for the full diagnosis (a solid-
- * primary-color test cycle on this exact board/panel driver): the
- * actual on-screen result is R'=commanded G, G'=commanded B, B'=
- * commanded R. White/black (equal or zero channels) are unaffected,
- * which is why this went unnoticed in every LVGL console render this
- * whole investigation -- text is white-on-black. Storing (b,r,g)
- * instead of (r,g,b) compensates. */
+/* The channel-rotation "bug" this used to compensate for (storing
+ * (b,r,g) instead of (r,g,b)) was diagnosed against a build with a
+ * structural DSI bring-up bug (a missing priming Start/Stop cycle --
+ * see hal_display.c's hal_display_start_video() comment) still
+ * present. With that real bug fixed, the compensation is no longer
+ * needed and actively wrong -- removed. */
 static inline lv_color_t lv_color_make(uint8_t r, uint8_t g, uint8_t b)
 {
     lv_color_t c;
-    uint8_t sr = b, sg = r, sb = g;
-    c.ch.red   = (sr >> 3) & 0x1F;
-    c.ch.green = (sg >> 2) & 0x3F;
-    c.ch.blue  = (sb >> 3) & 0x1F;
+    c.ch.red   = (r >> 3) & 0x1F;
+    c.ch.green = (g >> 2) & 0x3F;
+    c.ch.blue  = (b >> 3) & 0x1F;
     return c;
 }
 

@@ -1337,245 +1337,120 @@ void hal_display_init(void)
     panel_reset();
     hal_uart_puts("[DISP] reset done, DSI/LTDC not yet touched\r\n");
 
-    if (dsi_host_init() < 0)
-        return;
-
-    if (dsi_video_mode_init() < 0)
-        return;
-    /* dsi_phy_timers_init() is deliberately not called -- see the
-     * matching comment in hal_display_start_video(). Confirmed via live
-     * register dump against a known-good Zephyr run on this exact board
-     * that CLTCR/DLTCR should stay at their power-on-reset value here. */
-
-    hal_uart_puts("[DISP] sending OTM init\r\n");
-    /* Interrupts disabled for the whole ~100-command Command Mode
-     * sequence: saramOS runs a 1ms SysTick with interrupts globally
-     * enabled, unlike a proper RTOS with defined interrupt priorities
-     * (Zephyr), and a few microseconds of jitter at the wrong moment in
-     * DSI's own protocol timing is a margin no register-level
-     * comparison alone could rule out. disp_delay_ms()/_us() are plain
-     * busy-wait loops (not SysTick-driven), so otm8009a_init()'s
-     * explicit delays (10ms x2, 120ms) still work correctly with
-     * interrupts off. DSI->MCR.CMDM is still set here (Command Mode,
-     * its power-on-reset value) -- these commands drain from the FIFO
-     * immediately, no LP command window needed. Real Video Mode is only
-     * entered later, in hal_display_start_video(), after this sequence
-     * has already completed -- see that function's comment for why a
-     * single-incarnation approach that clears CMDM before this call
-     * (matching Zephyr's real attach()-before-panel-commands order, not
-     * just its final register values) was tried and does not work on
-     * this hardware with this driver's command mechanism. */
-    __asm volatile ("cpsid i" ::: "memory");
-    int otm_ret = otm8009a_init();
-    __asm volatile ("cpsie i" ::: "memory");
-    if (otm_ret < 0)
-        return;
-
-    hal_uart_puts("[DISP] init done, video not yet started\r\n");
-
-    /* hal_display_init() stops here, with the panel awake and
-     * initialized (still in Command Mode) but Video Mode not yet
-     * started and LTDC untouched -- callers must draw the desired
-     * first-frame content into the framebuffer (hal_display_fb_addr())
-     * and then call hal_display_start_video() once, after that content
-     * is in place. This avoids the tearing race that motivated the
-     * split in the first place: LTDC used to start scanning the
-     * framebuffer before the caller had drawn into it -- see git
-     * history for that original fix. */
+    /* hal_display_init() stops here -- no DSI/LTDC/panel work at all.
+     * Callers must draw the desired first-frame content into the
+     * framebuffer (hal_display_fb_addr()) and then call
+     * hal_display_start_video() once, which now does the ENTIRE DSI/
+     * LTDC/panel bring-up (including otm8009a_init()) in one place,
+     * matching the real ST BSP's BSP_LCD_InitEx() structure exactly --
+     * see that function's comment for the priming Start/Stop cycle this
+     * driver was missing for this whole investigation. This still
+     * avoids the tearing race that motivated the original split: LTDC
+     * used to start scanning the framebuffer before the caller had
+     * drawn into it -- see git history for that original fix. */
 }
 
 void hal_display_start_video(void)
 {
     hal_uart_puts("[DISP] starting video\r\n");
 
-    /* Read Display Power Mode (MIPI DCS 0x0A) here, still in Command
-     * Mode, before the switch to Video Mode below -- a DCS read needs a
-     * bus turn-around (LP transaction, reverse direction), and doing
-     * that once genuine continuous HS video is already streaming is a
-     * known-bad interaction on this hardware; verifying the link here
-     * avoids racing it against the mode switch. */
+    if (dsi_host_init() < 0) {
+        hal_uart_puts("[DISP] dsi_host_init failed\r\n");
+        return;
+    }
+
+    /* Priming Start/Stop cycle, matching the REAL ST BSP's
+     * BSP_LCD_InitEx() (Drivers/BSP/STM32F769I-Discovery/
+     * stm32f769i_discovery_lcd.c) structure exactly -- fetched and read
+     * directly from ST's own GitHub source this session, not inferred:
+     * it calls HAL_DSI_Init() then HAL_DSI_Start() immediately (BEFORE
+     * HAL_DSI_ConfigVideoMode() is ever called, so still Command Mode,
+     * MCR.CMDM at its power-on-reset value), does a panel ID read,
+     * then HAL_DSI_Stop() -- all before the real video-mode bring-up
+     * (ConfigVideoMode + LTDC_Init + a SECOND Start) even begins. This
+     * driver had never replicated that priming cycle before -- every
+     * earlier attempt at a single-incarnation, video-mode-from-the-
+     * start approach (this driver's own architecture, or Zephyr's, or
+     * just matching Zephyr's final register values) went straight from
+     * dsi_host_init() into video-mode config with no priming step, and
+     * reproducibly failed with FIFO-EMPTY-TIMEOUT once otm8009a_init()
+     * tried to send commands as LP-in-video. Testing whether this
+     * priming cycle -- which conditions the D-PHY/PLL analog state with
+     * one real enable/disable cycle before the bring-up that actually
+     * matters -- is what every earlier attempt was missing. */
+    DSI->CR |= DSI_CR_EN_Msk;
+    DSI->WCR |= DSI_WCR_DSIEN_Msk;
+    disp_delay_ms(10U);
     {
         uint8_t power_mode = 0;
         if (dsi_dcs_read(0x0AU, &power_mode, 1U) == 0) {
             char buf[48];
-            snprintf(buf, sizeof(buf), "[DISP] power mode read: 0x%02x\r\n",
+            snprintf(buf, sizeof(buf), "[DISP] priming power mode read: 0x%02x\r\n",
                      power_mode);
             hal_uart_puts(buf);
         } else {
-            hal_uart_puts("[DISP] power mode read: TIMEOUT\r\n");
+            hal_uart_puts("[DISP] priming power mode read: TIMEOUT\r\n");
         }
     }
-
-    /* Flip MCR.CMDM live on the SAME DSI Host/Wrapper incarnation that
-     * has been running (in Command Mode, CR.EN already set since
-     * dsi_host_init()) since hal_display_init() -- no peripheral reset,
-     * no second incarnation.
-     *
-     * This driver used to do a full RCC_APB2RSTR reset here and rebuild
-     * a second incarnation from scratch already in Video Mode, on the
-     * theory that a live CMDM flip on this exact hardware reliably
-     * tripped DSI->ISR error flags (TOHSTX/LPWRE). That theory was only
-     * ever tested against the OLD, wrong VMCR (0x00000000, every LP
-     * window disabled) -- not retried after VMCR was corrected to
-     * Zephyr's live 0x0000ff02 value. The reset-and-restart also turned
-     * out to have its own real cost: it left otm8009a_init()'s RAMWR
-     * (Memory Write, sent once in the first incarnation, right before
-     * the reset) applying to a GRAM write-session the panel had no
-     * reason to think still applied to a brand new incarnation's video
-     * stream. Sending RAMWR a second time -- as an LP command spliced
-     * into the second incarnation's already-running HS video -- was
-     * tried directly on hardware: it visibly changed the on-screen
-     * result (black -> color bands/stripes), confirming the panel's
-     * write-session state really was the issue, but splicing RAMWR into
-     * live streaming video did not produce a correctly-aligned picture
-     * either (misaligned GRAM writes, not just a plain "video not
-     * accepted" case).
-     *
-     * This version avoids the whole problem: RAMWR from otm8009a_init()
-     * and the video stream that is its response both happen in the same
-     * DSI incarnation, exactly like every reference implementation (ST
-     * BSP, Zephyr, Linux DRM) -- none of which ever reset the DSI
-     * peripheral mid-bring-up in the first place. */
-    ltdc_init(g_fb_addr); /* enables LTDC (GCR.LTDCEN) inline -- see its
-                            * own comment for why, matching real
-                            * HAL_LTDC_Init()'s own order. */
-    /* Testing a much longer settle gap here (was 10ms) before DSI ever
-     * starts streaming: a halftest run (solid color fills confined to
-     * one half of the screen, held 12s each) showed TOP/BOTTOM tests
-     * displaying correctly but LEFT/RIGHT tests visibly "creeping" --
-     * starting dim/partial and gradually spreading/brightening across
-     * the WHOLE screen over several seconds, worse than half-brightness
-     * throughout. That specific signature (fine over many frames for a
-     * hard-edged VERTICAL split, drifting for a hard-edged HORIZONTAL
-     * split, accumulating over real time) is consistent with a phase
-     * relationship between LTDC's pixel clock (PLLSAI-derived) and
-     * DSI's byte clock (WRPCR-derived) that needs real analog settle
-     * time to stabilize -- not captured by any register value snapshot,
-     * since register comparisons only show configured frequencies, not
-     * the two clock domains' actual phase alignment at any given
-     * moment. Zephyr's LTDC is started at POST_KERNEL and has had many
-     * seconds to settle by the time its DSI ever attaches; this
-     * driver's earlier 200ms version of this same experiment (see git
-     * history) may simply not have been long enough for an analog PLL
-     * settle process. */
-    disp_delay_ms(3000U);
-
-    /* Wait for an actual LTDC frame boundary (the line interrupt at
-     * line 0) before enabling WCR.DSIEN, instead of a fixed delay.
-     *
-     * With the fixed disp_delay_ms(10) gap this replaces, the observed
-     * symptom improved from black to a picture built from the drawn
-     * image's own real colors, but shown as displaced/shuffled color
-     * bands rather than a correctly laid-out image -- exactly what a
-     * video stream starting at an arbitrary point mid-frame (not
-     * frame-boundary-aligned) would produce: the panel's internal GRAM
-     * write pointer starts wherever the HS stream happens to be instead
-     * of at (0,0). LTDC->LIPCR/IER/ISR support exactly this kind of
-     * synchronization (line interrupt position register + line
-     * interrupt flag); this polls the flag rather than enabling an
-     * actual NVIC interrupt, since nothing here needs to run
-     * asynchronously. */
-    LTDC->LIPCR = 0U; /* fire at line 0 -- the start of a frame */
-    LTDC->ICR = LTDC_ICR_CLIF_Msk; /* clear any stale pending flag first */
-    /* LTDC->ISR.LIF never latched at all in an earlier version of this
-     * wait, even confirmed-live during steady-state running (CPSR
-     * varying, proving the LTDC is genuinely scanning, while ISR stayed
-     * 0x00000000 for seconds). Some STM32 peripherals require the
-     * matching *Enable* bit set for their status flag to latch at all
-     * (not just to route into NVIC) -- testing that here for LTDC's
-     * line interrupt specifically, since nothing else about this
-     * explains a flag that never sets despite the hardware condition it
-     * reports on demonstrably being true. NVIC itself is never touched,
-     * so this cannot cause an actual interrupt entry regardless. */
-    LTDC->IER |= LTDC_IER_LIE_Msk;
-    {
-        /* Frame period at this timing is ~46ms (870 total pixel-clocks/
-         * line * 511 lines / 9.6MHz); a tight register-read-and-branch
-         * poll loop runs far faster per iteration than the calibrated
-         * disp_delay_ms()/_us() loops (those force a memory store every
-         * iteration), so a budget sized like those delay loops'
-         * iteration counts is nowhere near enough real time here --
-         * confirmed on hardware: 1,000,000 iterations timed out every
-         * time, well under one frame period. Sized generously (tens of
-         * ms at minimum even at a pessimistic few cycles/iteration) to
-         * comfortably clear a full frame. */
-        uint32_t li_timeout = 50000000U;
-        while (!(LTDC->ISR & LTDC_ISR_LIF_Msk)) {
-            if (--li_timeout == 0U) {
-                hal_uart_puts("[DISP] line-interrupt sync timeout, proceeding anyway\r\n");
-                break;
-            }
-        }
-        LTDC->ICR = LTDC_ICR_CLIF_Msk;
-        LTDC->IER &= ~LTDC_IER_LIE_Msk;
-    }
-
-    DSI->MCR &= ~DSI_MCR_CMDM_Msk;
-    DSI->WCR |= DSI_WCR_DSIEN_Msk; /* first time this is set -- the
-                                     * wrapper starts driving pixels from
-                                     * the framebuffer into the DSI link
-                                     * from here on, now right at a frame
-                                     * boundary instead of an arbitrary
-                                     * point mid-frame. */
+    DSI->WCR &= ~DSI_WCR_DSIEN_Msk;
+    DSI->CR &= ~DSI_CR_EN_Msk;
     disp_delay_ms(10U);
 
-    /* Re-send CASET + PASET + RAMWR here, now that Video Mode is
-     * actually running (as LP commands embedded in the live stream --
-     * the same mechanism the power-mode read below already uses
-     * successfully). otm8009a_init() already sent all three once, but
-     * in Command Mode, before this incarnation ever transitioned to
-     * Video Mode.
-     *
-     * Every static register this driver configures (DSI Host, DSI
-     * Wrapper, LTDC, RCC clock tree, FMC/SDRAM timing) has now been
-     * cross-checked byte-for-byte against a live, verified-stable
-     * Zephyr run on this exact board -- zero discrepancies remain, and
-     * double buffering (see lvgl_port.c/lvgl.c) ruled out any redraw/
-     * tearing race by construction. Yet the picture consistently comes
-     * out with the drawn image's own real, correct colors but
-     * positionally scrambled into bands -- for "picture" (a single
-     * static draw, no redraw at all, so no timing race is even
-     * possible there) just as much as for gfxshell. Since content is
-     * right and every host-side register matches, what is left is the
-     * *panel's own* internal state: CASET/PASET define the GRAM
-     * write-window OTM8009A applies incoming pixel data to, and RAMWR
-     * is what tells it "start applying pixel data to that window from
-     * (0,0)". They were all sent once, in Command Mode, before this
-     * incarnation ever entered Video Mode -- re-sending them now, right
-     * as Video Mode actually starts, tests whether the panel's write-
-     * window/pointer needs a fresh reset at that specific transition
-     * rather than carrying over correctly from the Command Mode
-     * session. */
-    {
-        static const uint8_t caset_landscape[] = {0x00, 0x00, 0x03, 0x1FU};
-        static const uint8_t paset_landscape[] = {0x00, 0x00, 0x01, 0xDFU};
-        (void)otm8009a_write_reg(OTM8009A_CMD_CASET, caset_landscape, sizeof(caset_landscape));
-        (void)otm8009a_write_reg(OTM8009A_CMD_PASET, paset_landscape, sizeof(paset_landscape));
-        {
-            uint8_t ramwr_param = 0x00U;
-            (void)otm8009a_write_reg(OTM8009A_CMD_RAMWR, &ramwr_param, 0U);
-        }
+    /* Real video-mode bring-up now. dsi_video_mode_init() configures
+     * VMCR/VHSACR/etc.; MCR.CMDM is cleared right after, matching
+     * HAL_DSI_ConfigVideoMode()'s own first step (it clears MCR.CMDM
+     * and WCFGR.DSIM before touching any of the video timing
+     * registers -- WCFGR.DSIM is already 0 by reset default on this
+     * hardware, live-verified against Zephyr, so only CMDM needs an
+     * explicit clear here). */
+    if (dsi_video_mode_init() < 0) {
+        hal_uart_puts("[DISP] dsi_video_mode_init failed\r\n");
+        return;
+    }
+    DSI->MCR &= ~DSI_MCR_CMDM_Msk;
+    /* dsi_phy_timers_init() is deliberately not called -- live-verified
+     * against a known-good Zephyr run that CLTCR/DLTCR should stay at
+     * their power-on-reset value here, and ST's own BSP_LCD_InitEx()
+     * never calls HAL_DSI_ConfigPhyTimer() for this panel either. */
+
+    ltdc_init(g_fb_addr); /* enables LTDC (GCR.LTDCEN) inline, matching
+                            * real HAL_LTDC_Init()'s own order -- ST's
+                            * BSP_LCD_InitEx() also calls this (via
+                            * HAL_LTDC_StructInitFromVideoConfig() +
+                            * HAL_LTDC_Init()) BEFORE its second/real
+                            * HAL_DSI_Start(), with the comment "Enable
+                            * the DSI host and wrapper after the LTDC
+                            * initialization. To avoid any
+                            * synchronization issue, the DSI shall be
+                            * started after enabling the LTDC" -- this
+                            * driver already does exactly that. */
+
+    /* The real Start -- this DSI Host/Wrapper incarnation is now "born"
+     * already in Video Mode (CMDM cleared above, before this enable),
+     * with the priming cycle already having exercised a full enable/
+     * disable transition once beforehand. */
+    DSI->CR |= DSI_CR_EN_Msk;
+    DSI->WCR |= DSI_WCR_DSIEN_Msk;
+
+    /* Settle gap mirroring the incidental delay ST's own reference gets
+     * for free here: BSP_LCD_InitEx() calls BSP_SDRAM_Init() at exactly
+     * this point in its sequence (between the real HAL_DSI_Start() and
+     * OTM8009A_Init()) when SDRAM isn't already set up by the caller.
+     * This driver's SDRAM is already initialized by this point (the
+     * caller does it before hal_display_init()), so there's no
+     * equivalent real work to insert here -- an explicit delay stands
+     * in for it. */
+    disp_delay_ms(50U);
+
+    hal_uart_puts("[DISP] sending OTM init (as LP-in-video, single incarnation, ST BSP order)\r\n");
+    __asm volatile ("cpsid i" ::: "memory");
+    int otm_ret = otm8009a_init();
+    __asm volatile ("cpsie i" ::: "memory");
+    if (otm_ret < 0) {
+        hal_uart_puts("[DISP] otm8009a_init failed\r\n");
+        return;
     }
 
-    /* LTDC->ISR.LIF turned out to need IER.LIE set to latch at all --
-     * confirmed above -- despite the peripheral demonstrably meeting the
-     * condition it reports on (LIF never latched even while CPSR was
-     * shown live-varying, i.e. genuinely scanning). ISR.FUIF (FIFO
-     * Underrun) and ISR.TERRIF (Transfer Error) are strong suspects for
-     * the same behavior: if so, EVERY earlier "LTDC->ISR == 0, no
-     * errors" check this whole investigation was a false negative that
-     * could have been masking a real, periodic FIFO underrun the entire
-     * time -- e.g. the LTDC's SDRAM read requests occasionally losing
-     * an AHB bus arbitration to saramOS's own SysTick/scheduler
-     * activity (a 1ms SysTick with interrupts globally enabled, no
-     * defined interrupt priorities, unlike Zephyr) -- which would show
-     * up on screen as exactly this driver's repeated symptom: a picture
-     * built from real, correct pixel data but positionally scrambled
-     * into bands, since a dropped/stalled FIFO read desyncs the LTDC's
-     * pixel counter from its actual SDRAM read position for the rest of
-     * that frame. Enabling these now, purely to make the status flags
-     * usable for the poll below -- NVIC is never touched for LTDC, so
-     * this cannot cause an actual interrupt entry. */
     LTDC->ICR = LTDC_ICR_CFUIF_Msk | LTDC_ICR_CTERRIF_Msk;
     LTDC->IER |= LTDC_IER_FUIE_Msk | LTDC_IER_TERRIE_Msk;
 
