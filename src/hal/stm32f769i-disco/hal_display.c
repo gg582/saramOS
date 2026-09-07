@@ -340,6 +340,12 @@ typedef struct {
 #define LTDC_SRCR_IMR           (1U << 0)
 #define LTDC_LAYER_CR_LEN       (1U << 0)
 #define LTDC_PIXEL_FORMAT_RGB565 0x00000002U
+#define LTDC_ISR_LIF_Pos        0U
+#define LTDC_ISR_LIF_Msk        (1U << LTDC_ISR_LIF_Pos)
+#define LTDC_ICR_CLIF_Pos       0U
+#define LTDC_ICR_CLIF_Msk       (1U << LTDC_ICR_CLIF_Pos)
+#define LTDC_IER_LIE_Pos        0U
+#define LTDC_IER_LIE_Msk        (1U << LTDC_IER_LIE_Pos)
 
 /* --- OTM8009A commands --- */
 #define OTM8009A_CMD_NOP        0x00U
@@ -1363,11 +1369,64 @@ void hal_display_start_video(void)
                             * own comment for why, matching real
                             * HAL_LTDC_Init()'s own order. */
     disp_delay_ms(10U);
+
+    /* Wait for an actual LTDC frame boundary (the line interrupt at
+     * line 0) before enabling WCR.DSIEN, instead of a fixed delay.
+     *
+     * With the fixed disp_delay_ms(10) gap this replaces, the observed
+     * symptom improved from black to a picture built from the drawn
+     * image's own real colors, but shown as displaced/shuffled color
+     * bands rather than a correctly laid-out image -- exactly what a
+     * video stream starting at an arbitrary point mid-frame (not
+     * frame-boundary-aligned) would produce: the panel's internal GRAM
+     * write pointer starts wherever the HS stream happens to be instead
+     * of at (0,0). LTDC->LIPCR/IER/ISR support exactly this kind of
+     * synchronization (line interrupt position register + line
+     * interrupt flag); this polls the flag rather than enabling an
+     * actual NVIC interrupt, since nothing here needs to run
+     * asynchronously. */
+    LTDC->LIPCR = 0U; /* fire at line 0 -- the start of a frame */
+    LTDC->ICR = LTDC_ICR_CLIF_Msk; /* clear any stale pending flag first */
+    /* LTDC->ISR.LIF never latched at all in an earlier version of this
+     * wait, even confirmed-live during steady-state running (CPSR
+     * varying, proving the LTDC is genuinely scanning, while ISR stayed
+     * 0x00000000 for seconds). Some STM32 peripherals require the
+     * matching *Enable* bit set for their status flag to latch at all
+     * (not just to route into NVIC) -- testing that here for LTDC's
+     * line interrupt specifically, since nothing else about this
+     * explains a flag that never sets despite the hardware condition it
+     * reports on demonstrably being true. NVIC itself is never touched,
+     * so this cannot cause an actual interrupt entry regardless. */
+    LTDC->IER |= LTDC_IER_LIE_Msk;
+    {
+        /* Frame period at this timing is ~46ms (870 total pixel-clocks/
+         * line * 511 lines / 9.6MHz); a tight register-read-and-branch
+         * poll loop runs far faster per iteration than the calibrated
+         * disp_delay_ms()/_us() loops (those force a memory store every
+         * iteration), so a budget sized like those delay loops'
+         * iteration counts is nowhere near enough real time here --
+         * confirmed on hardware: 1,000,000 iterations timed out every
+         * time, well under one frame period. Sized generously (tens of
+         * ms at minimum even at a pessimistic few cycles/iteration) to
+         * comfortably clear a full frame. */
+        uint32_t li_timeout = 50000000U;
+        while (!(LTDC->ISR & LTDC_ISR_LIF_Msk)) {
+            if (--li_timeout == 0U) {
+                hal_uart_puts("[DISP] line-interrupt sync timeout, proceeding anyway\r\n");
+                break;
+            }
+        }
+        LTDC->ICR = LTDC_ICR_CLIF_Msk;
+        LTDC->IER &= ~LTDC_IER_LIE_Msk;
+    }
+
     DSI->MCR &= ~DSI_MCR_CMDM_Msk;
     DSI->WCR |= DSI_WCR_DSIEN_Msk; /* first time this is set -- the
                                      * wrapper starts driving pixels from
                                      * the framebuffer into the DSI link
-                                     * from here on. */
+                                     * from here on, now right at a frame
+                                     * boundary instead of an arbitrary
+                                     * point mid-frame. */
     disp_delay_ms(10U);
 
     hal_display_backlight_on();
