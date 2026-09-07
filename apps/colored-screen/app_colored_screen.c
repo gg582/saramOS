@@ -296,6 +296,119 @@ static void cli_longtest(const char *arg)
     hal_uart_puts("longtest: done\r\n");
 }
 
+/* Shows GREEN as a FULL-WIDTH horizontal band (no left/right split at
+ * all) at 5 different Y positions -- top, upper-mid, middle, lower-mid,
+ * bottom -- each held long enough to read the color off precisely.
+ * Tests directly whether the apparent color drifts with Y position even
+ * for uniform, full-width content (which halftest/colortest never
+ * isolated -- they only checked whether the intended region lit up, not
+ * whether its exact color held constant down the frame). If the color
+ * itself shifts by row, the RGB channel-rotation "bug" fixed earlier
+ * this session and the horizontal-split "bleeding" artifact are likely
+ * the same root cause (a rotation amount that isn't actually constant
+ * across the frame, just averaged-out/invisible for solid full-frame
+ * fills) rather than two separate bugs. */
+static const int k_band_y[] = {0, 100, 200, 300, 400};
+#define K_NUM_BANDS ((int)(sizeof(k_band_y) / sizeof(k_band_y[0])))
+#define BAND_HEIGHT 60
+
+static void cli_bandtest(const char *arg)
+{
+    (void)arg;
+
+    if (!g_colortest_ready) {
+        hal_uart_puts("bandtest: init display\r\n");
+        hal_sdram_init();
+        hal_display_init();
+        fill_screen(rgb565(0, 0, 0));
+        hal_display_start_video();
+        g_colortest_ready = 1;
+        hal_uart_puts("bandtest: display ready\r\n");
+    }
+
+    for (int i = 0; i < K_NUM_BANDS; i++) {
+        hal_uart_puts("bandtest: clear\r\n");
+        fill_screen(rgb565(0, 0, 0));
+        delay_ms(3000U);
+
+        int y0 = k_band_y[i];
+        int y1 = y0 + BAND_HEIGHT;
+        if (y1 > (int)DISPLAY_HEIGHT) y1 = (int)DISPLAY_HEIGHT;
+
+        char buf[64];
+        int off = 0;
+        const char *prefix = "bandtest: showing GREEN band at y=";
+        while (prefix[off]) { buf[off] = prefix[off]; off++; }
+        int digits[3], nd = 0;
+        int v = y0;
+        if (v == 0) { digits[nd++] = 0; }
+        while (v > 0) { digits[nd++] = v % 10; v /= 10; }
+        for (int k = nd - 1; k >= 0; k--) buf[off++] = (char)('0' + digits[k]);
+        buf[off++] = '\r';
+        buf[off++] = '\n';
+        buf[off] = '\0';
+        hal_uart_puts(buf);
+
+        fill_rect(0, y0, (int)DISPLAY_WIDTH, y1, rgb565(0, 255, 0));
+        delay_ms(8000U);
+    }
+
+    hal_uart_puts("bandtest: clear\r\n");
+    fill_screen(rgb565(0, 0, 0));
+    hal_uart_puts("bandtest: done\r\n");
+}
+
+/* Classic SMPTE-style color bars: 7 equal-width vertical stripes
+ * spanning the full screen, all shown at once (White, Yellow, Cyan,
+ * Green, Magenta, Red, Blue -- decreasing luminance left to right, the
+ * traditional TV test-pattern order). Puts every color and 6
+ * simultaneous vertical (horizontal-direction) transitions on screen
+ * together as one static pattern -- bandtest (full-width horizontal
+ * bands) already showed color is stable down the frame (Y-independent,
+ * ruling out a Y-drifting rotation), so this is the complementary
+ * check: is the halftest/stripetest bleeding artifact visible at every
+ * X boundary simultaneously, confined to specific boundaries, or does
+ * having many transitions on screen at once change the picture (e.g.
+ * bleeding between adjacent bars) versus a single isolated boundary? */
+static const struct {
+    const char *name;
+    uint8_t r, g, b;
+} k_bars[] = {
+    {"WHITE",   255, 255, 255},
+    {"YELLOW",  255, 255, 0  },
+    {"CYAN",    0,   255, 255},
+    {"GREEN",   0,   255, 0  },
+    {"MAGENTA", 255, 0,   255},
+    {"RED",     255, 0,   0  },
+    {"BLUE",    0,   0,   255},
+};
+#define K_NUM_BARS ((int)(sizeof(k_bars) / sizeof(k_bars[0])))
+
+static void cli_colorbars(const char *arg)
+{
+    (void)arg;
+
+    if (!g_colortest_ready) {
+        hal_uart_puts("colorbars: init display\r\n");
+        hal_sdram_init();
+        hal_display_init();
+        fill_screen(rgb565(0, 0, 0));
+        hal_display_start_video();
+        g_colortest_ready = 1;
+        hal_uart_puts("colorbars: display ready\r\n");
+    }
+
+    hal_uart_puts("colorbars: showing SMPTE-style bars (White/Yellow/Cyan/Green/Magenta/Red/Blue)\r\n");
+    int bar_w = (int)DISPLAY_WIDTH / K_NUM_BARS;
+    for (int i = 0; i < K_NUM_BARS; i++) {
+        int x0 = i * bar_w;
+        int x1 = (i == K_NUM_BARS - 1) ? (int)DISPLAY_WIDTH : (x0 + bar_w);
+        fill_rect(x0, 0, x1, (int)DISPLAY_HEIGHT,
+                  rgb565(k_bars[i].r, k_bars[i].g, k_bars[i].b));
+    }
+    hal_uart_puts("colorbars: done, holding\r\n");
+}
+
 void app_register_commands(void)
 {
     extern void cli_register_command(const char *name,
@@ -304,4 +417,6 @@ void app_register_commands(void)
     cli_register_command("halftest", cli_halftest);
     cli_register_command("longtest", cli_longtest);
     cli_register_command("stripetest", cli_stripetest);
+    cli_register_command("bandtest", cli_bandtest);
+    cli_register_command("colorbars", cli_colorbars);
 }
