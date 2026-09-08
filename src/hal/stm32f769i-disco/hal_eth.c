@@ -238,10 +238,24 @@ int hal_eth_init(const uint8_t *mac_addr)
     /* Reset Ethernet MAC */
     ETH->CR = 0;
 
-    /* MAC configuration: checksum offload, automatic pad/CRC stripping,
-     * inter-frame gap 96 bits. Speed/duplex applied after PHY negotiation. */
+    /* MAC configuration: automatic pad/CRC stripping, inter-frame gap
+     * 96 bits. Speed/duplex applied after PHY negotiation.
+     *
+     * Deliberately NOT setting ETH_MACCR_IPCO (IPv4 checksum offload):
+     * lwipopts.h has CHECKSUM_BY_HARDWARE=0, so lwIP already verifies
+     * every checksum itself in software regardless -- IPCO's hardware
+     * check is pure redundancy on top of that, and it's redundancy
+     * that costs something: any frame IPCO's checksum engine flags
+     * (right or wrong) sets ETH_RDES0_ES, and this driver drops the
+     * whole frame on ES without distinguishing "genuine CRC/framing
+     * error" from "IPCO's checksum engine didn't like this frame's
+     * shape" (IP options, certain multicast/IGMP framing, ...) --
+     * repeated "[ETH] RX ES error!" logs were observed on ordinary
+     * mDNS/IGMP background traffic, including frames with entirely
+     * valid-looking IPv4 headers (IP options included). Turning IPCO
+     * off removes that whole false-positive class; lwIP's own software
+     * check still catches anything genuinely bad. */
     ETH->CR = ETH_MACCR_APCS |     /* automatic pad/CRC strip */
-              ETH_MACCR_IPCO |     /* IPv4 checksum offload */
               ETH_MACCR_IFG_96;
 
     /* Frame filter: pass all multicast + broadcast implicitly + perfect */
