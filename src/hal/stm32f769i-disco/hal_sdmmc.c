@@ -28,12 +28,22 @@
 /* SDMMC2's kernel clock is SYSCLK (SDMMC2SEL reset default = 0 = SYSCLK;
  * nothing in this file selects PLL48CLK instead), which changed from
  * 168 MHz to 216 MHz when hal_sys.c was updated to match Zephyr's SDRAM
- * clock reference (216/168 = 1.2857x). Both divisors below are scaled up
- * by that same factor (rounded so the actual clock does not exceed what
- * it was before) so the slow/fast SDMMC_CK targets stay put despite the
- * higher SYSCLK. */
+ * clock reference (216/168 = 1.2857x).
+ *
+ * SDIO_CK = SDIOCLK / (CLKDIV + 2) (BYPASS=0, NEGEDGE=0). The "fast"
+ * divisor here used to be scaled to keep the *pre-existing* target
+ * frequency across that SYSCLK change (DIV=1 @ 168 MHz -> 56 MHz;
+ * DIV=2 @ 216 MHz -> 54 MHz), but that pre-existing target was itself
+ * already out of spec: SD "Default Speed" tops out at 25 MHz, and
+ * "High Speed" (up to 50 MHz) requires switching the card into it via
+ * CMD6 first, which this driver never does. Running sustained transfers
+ * near 54 MHz without that negotiation is a plausible cause of the
+ * SD FIFO simply stopping mid-transfer under real load (confirmed via
+ * debugger: a task got stuck forever in sdmmc_fifo_read()'s poll loop,
+ * see that function's comment and sdmmc_write_block()'s bounded
+ * timeout fix). DIV=7 targets a spec-compliant ~24 MHz instead. */
 #define SDMMC_CLK_SLOW_DIV  26U   /* was 20 @ 168 MHz */
-#define SDMMC_CLK_FAST_DIV  2U    /* was 1 @ 168 MHz */
+#define SDMMC_CLK_FAST_DIV  7U    /* ~24 MHz @ 216 MHz -- spec-compliant Default Speed */
 
 #define SD_CMD_ERR_MASK     (SDMMC_STA_CCRCFAIL | SDMMC_STA_CTIMEOUT)
 #define SD_DATA_ERR_MASK    (SDMMC_STA_DCRCFAIL | SDMMC_STA_DTIMEOUT | \
@@ -255,24 +265,45 @@ static int sdmmc_set_bus_width_4bit(void)
     return HAL_SDMMC_OK;
 }
 
-static void sdmmc_fifo_read(uint8_t *buf, uint32_t words)
+/* Per-word FIFO poll timeout. These loops used to spin with no bound at
+ * all -- if the card ever stopped delivering FIFO data mid-transfer
+ * (confirmed happening in practice: PC sampled here repeatedly via
+ * debugger while the board was hung), the calling task would be stuck
+ * forever with no way out. Whichever task that happens to be blocks
+ * completely from that point on -- when it was net_task (ETH/lwIP
+ * servicing, see main.c), the entire network stack died silently: the
+ * CLI kept working fine (different task), but no new connections, no
+ * DHCP renewal, nothing, ever again, with no crash or error logged
+ * anywhere to explain why. A bounded timeout turns that into a single
+ * failed read/write instead. */
+#define SDMMC_FIFO_WORD_TIMEOUT 200000U
+
+static int sdmmc_fifo_read(uint8_t *buf, uint32_t words)
 {
     uint32_t *p = (uint32_t *)(void *)buf;
     for (uint32_t i = 0; i < words; i++) {
-        while (!(SDMMC2->STA & (SDMMC_STA_RXFIFOHF | SDMMC_STA_RXDAVL)))
-            ;
+        uint32_t timeout = SDMMC_FIFO_WORD_TIMEOUT;
+        while (!(SDMMC2->STA & (SDMMC_STA_RXFIFOHF | SDMMC_STA_RXDAVL))) {
+            if (--timeout == 0)
+                return HAL_SDMMC_TIMEOUT;
+        }
         p[i] = SDMMC2->FIFO;
     }
+    return HAL_SDMMC_OK;
 }
 
-static void sdmmc_fifo_write(const uint8_t *buf, uint32_t words)
+static int sdmmc_fifo_write(const uint8_t *buf, uint32_t words)
 {
     const uint32_t *p = (const uint32_t *)(const void *)buf;
     for (uint32_t i = 0; i < words; i++) {
-        while (!(SDMMC2->STA & SDMMC_STA_TXFIFOHE))
-            ;
+        uint32_t timeout = SDMMC_FIFO_WORD_TIMEOUT;
+        while (!(SDMMC2->STA & SDMMC_STA_TXFIFOHE)) {
+            if (--timeout == 0)
+                return HAL_SDMMC_TIMEOUT;
+        }
         SDMMC2->FIFO = p[i];
     }
+    return HAL_SDMMC_OK;
 }
 
 static int sdmmc_setup_data_xfer(uint32_t blocks, int direction_read)
@@ -300,7 +331,11 @@ static int sdmmc_read_block(uint32_t lba, uint8_t *buf)
     if (rc != HAL_SDMMC_OK)
         return rc;
 
-    sdmmc_fifo_read(buf, HAL_SDMMC_BLOCK_SIZE / 4U);
+    rc = sdmmc_fifo_read(buf, HAL_SDMMC_BLOCK_SIZE / 4U);
+    if (rc != HAL_SDMMC_OK) {
+        sdmmc_clear_flags();
+        return rc;
+    }
 
     rc = sdmmc_wait_data_end(100000U);
     if (rc != HAL_SDMMC_OK) {
@@ -329,7 +364,11 @@ static int sdmmc_write_block(uint32_t lba, const uint8_t *buf)
     if (rc != HAL_SDMMC_OK)
         return rc;
 
-    sdmmc_fifo_write(buf, HAL_SDMMC_BLOCK_SIZE / 4U);
+    rc = sdmmc_fifo_write(buf, HAL_SDMMC_BLOCK_SIZE / 4U);
+    if (rc != HAL_SDMMC_OK) {
+        sdmmc_clear_flags();
+        return rc;
+    }
 
     rc = sdmmc_wait_data_end(100000U);
     if (rc != HAL_SDMMC_OK) {
@@ -561,13 +600,29 @@ int hal_sdmmc_send_cmd(uint32_t cmd, uint32_t arg, uint32_t *resp)
     return sdmmc_send_cmd_raw((uint8_t)cmd, arg, 1, resp);
 }
 
+/* Some sectors -- observed repeatedly and specifically at a partition's
+ * first LBA right after a fresh format (a never-written region from the
+ * card's own flash-translation-layer perspective) -- time out on the
+ * very first attempt but succeed immediately on a retry. A handful of
+ * retries with a short backoff turns that into a non-issue instead of
+ * a hard read/write failure (which, for a read, means f_mount() itself
+ * fails with FR_DISK_ERR/FR_NO_FILESYSTEM even though the volume is
+ * completely fine). */
+#define SDMMC_BLOCK_RETRY_MAX 5U
+
 int hal_sdmmc_read_blocks(uint32_t lba, uint8_t *buf, uint32_t count)
 {
     if (!sd_initialized)
         return HAL_SDMMC_ERR;
 
     for (uint32_t i = 0; i < count; i++) {
-        int rc = sdmmc_read_block(lba + i, &buf[i * HAL_SDMMC_BLOCK_SIZE]);
+        int rc = HAL_SDMMC_ERR;
+        for (uint32_t attempt = 0; attempt < SDMMC_BLOCK_RETRY_MAX; attempt++) {
+            rc = sdmmc_read_block(lba + i, &buf[i * HAL_SDMMC_BLOCK_SIZE]);
+            if (rc == HAL_SDMMC_OK)
+                break;
+            sd_delay(50000 * (attempt + 1));
+        }
         if (rc != HAL_SDMMC_OK)
             return rc;
     }
@@ -580,7 +635,13 @@ int hal_sdmmc_write_blocks(uint32_t lba, const uint8_t *buf, uint32_t count)
         return HAL_SDMMC_ERR;
 
     for (uint32_t i = 0; i < count; i++) {
-        int rc = sdmmc_write_block(lba + i, &buf[i * HAL_SDMMC_BLOCK_SIZE]);
+        int rc = HAL_SDMMC_ERR;
+        for (uint32_t attempt = 0; attempt < SDMMC_BLOCK_RETRY_MAX; attempt++) {
+            rc = sdmmc_write_block(lba + i, &buf[i * HAL_SDMMC_BLOCK_SIZE]);
+            if (rc == HAL_SDMMC_OK)
+                break;
+            sd_delay(50000 * (attempt + 1));
+        }
         if (rc != HAL_SDMMC_OK)
             return rc;
     }
