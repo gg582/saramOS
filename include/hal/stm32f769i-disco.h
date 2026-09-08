@@ -53,6 +53,58 @@ extern "C" {
 
 #define RCC_DCKCFGR2_SDMMC1SEL  (1U << 28)
 
+#define RCC_APB1ENR_I2C1EN      (1U << 21)
+#define RCC_APB1RSTR_I2C1RST    (1U << 21)
+
+/* --- I2C1 (touch controller, PB8=SCL/PB9=SDA, AF4) ---
+ * Register layout per RM0410 (STM32F76xxx/77xxx), "I2C" peripheral v2.
+ * Used polling-only, same style as this board's other HAL drivers. */
+#define I2C1_BASE       0x40005400U
+
+typedef struct {
+    volatile uint32_t CR1;
+    volatile uint32_t CR2;
+    volatile uint32_t OAR1;
+    volatile uint32_t OAR2;
+    volatile uint32_t TIMINGR;
+    volatile uint32_t TIMEOUTR;
+    volatile uint32_t ISR;
+    volatile uint32_t ICR;
+    volatile uint32_t PECR;
+    volatile uint32_t RXDR;
+    volatile uint32_t TXDR;
+} I2C_TypeDef;
+
+#define I2C1            ((I2C_TypeDef *)I2C1_BASE)
+
+#define I2C_CR1_PE              (1U << 0)
+#define I2C_CR1_ANFOFF          (1U << 12)
+
+#define I2C_CR2_SADD7_Pos       1U
+#define I2C_CR2_RD_WRN          (1U << 10)
+#define I2C_CR2_ADD10           (1U << 11)
+#define I2C_CR2_START           (1U << 13)
+#define I2C_CR2_STOP            (1U << 14)
+#define I2C_CR2_NACK            (1U << 15)
+#define I2C_CR2_NBYTES_Pos      16U
+#define I2C_CR2_RELOAD          (1U << 24)
+#define I2C_CR2_AUTOEND         (1U << 25)
+
+#define I2C_ISR_TXE             (1U << 0)
+#define I2C_ISR_TXIS            (1U << 1)
+#define I2C_ISR_RXNE            (1U << 2)
+#define I2C_ISR_ADDR            (1U << 3)
+#define I2C_ISR_NACKF           (1U << 4)
+#define I2C_ISR_STOPF           (1U << 5)
+#define I2C_ISR_TC              (1U << 6)
+#define I2C_ISR_TCR             (1U << 7)
+#define I2C_ISR_BERR            (1U << 8)
+#define I2C_ISR_ARLO            (1U << 9)
+#define I2C_ISR_BUSY            (1U << 15)
+
+#define I2C_ICR_NACKCF          (1U << 4)
+#define I2C_ICR_STOPCF          (1U << 5)
+
 /* --- SYSCFG --- */
 #define SYSCFG_BASE     0x40013800U
 #define SYSCFG_PMC      (*(volatile uint32_t *)(SYSCFG_BASE + 0x04U))

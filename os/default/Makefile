@@ -137,6 +137,15 @@ HAL_SRC += $(DISPLAY_ONLY_HAL_SRC)
 CFLAGS_EXTRA += -DENABLE_GRAPHICAL_SHELL=1
 endif
 
+# drop-a-file needs the display/SDRAM HAL (same as colored-screen -- it
+# draws straight into the framebuffer, no LVGL) plus SD card/FatFS access
+# (already unconditional via FATFS_SRC/sd_diskio.c) and lwIP httpd
+# (already unconditional via LWIP_SRC).
+ifeq ($(findstring app_drop_a_file.c,$(EXTRA_APP_SRCS)),app_drop_a_file.c)
+HAL_SRC += $(DISPLAY_ONLY_HAL_SRC) $(HAL_DIR)/hal_touch.c
+CFLAGS_EXTRA += -DENABLE_GRAPHICAL_SHELL=1
+endif
+
 # draw-picora needs the display/SDRAM HAL (same as colored-screen -- it
 # draws straight into the framebuffer, no LVGL) plus GPIO (already
 # unconditional via HAL_SRC's hal_gpio.c) for the user button.
