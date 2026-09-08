@@ -83,7 +83,12 @@
 #define LWIP_HTTPD                  1
 #define LWIP_HTTPD_SSI              0
 #define LWIP_HTTPD_CGI              0
-#define LWIP_HTTPD_SUPPORT_POST     0
+#define LWIP_HTTPD_SUPPORT_POST     1
+/* Custom-file hook (fs_open_custom()/fs_close_custom()) lets an app serve
+ * its own pages without editing the shared fsdata_custom.c table -- used
+ * by the drop-a-file example app. Weak default implementations live in
+ * http_server.c so apps that don't need it still link cleanly. */
+#define LWIP_HTTPD_CUSTOM_FILES     1
 #define LWIP_HTTPD_SUPPORT_EXTSTATUS 0
 #define LWIP_HTTPD_SUPPORT_REQUESTLIST 0
 #define LWIP_HTTPD_SUPPORT_V09      0
