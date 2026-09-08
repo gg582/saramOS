@@ -771,8 +771,17 @@ void app_register_commands(void)
         saramos_task_add(&draw_task_tcb);
     }
 
-    /* Touch test (see touch_task_entry()'s comment) -- its own TCB
-     * task, same priority/reasoning as the others above. */
+    /* Touch test (see touch_task_entry()'s comment). This board's touch
+     * panel never ACKs on I2C1 (confirmed clean, protocol-level NACK at
+     * both candidate addresses -- likely not physically populated on
+     * this unit; I2C1 register-level setup itself is verified correct
+     * against ST's official CMSIS header). Enabling it was also
+     * observed once to coincide with image drawing appearing broken --
+     * re-enabled here to check whether that was a real conflict or
+     * just CPU dilution on top of the (now fixed, see hal_sdmmc.c's
+     * SDMMC_FIFO_WORD_TIMEOUT) multi-minute SD read timeout bug. */
+#define DROP_A_FILE_ENABLE_TOUCH 0
+#if DROP_A_FILE_ENABLE_TOUCH
     hal_touch_init();
     {
         static uint8_t touch_task_stack[2048];
@@ -783,6 +792,7 @@ void app_register_commands(void)
                           100U, NULL, NULL);
         saramos_task_add(&touch_task_tcb);
     }
+#endif
 
-    hal_uart_puts("drop-a-file: auto-started (net/sd/http/display/touch)\r\n");
+    hal_uart_puts("drop-a-file: auto-started (net/sd/http/display)\r\n");
 }

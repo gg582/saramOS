@@ -74,11 +74,9 @@ static void i2c1_init(void)
 
     I2C1->CR1 &= ~I2C_CR1_PE;
     I2C1->TIMINGR = I2C1_TIMING_VALUE;
-    /* I2C_CR1_ANFOFF means "analog filter OFF" -- leaving it clear (0)
-     * keeps the analog filter enabled (the recommended default), so
-     * CR1 is just left at 0 here rather than setting the bit (an
-     * earlier version of this line set it, backwards from the intent
-     * stated in its own comment -- fixed). */
+    /* I2C_CR1_ANFOFF means "analog filter OFF" -- leave it clear (0)
+     * so the analog filter stays enabled (the recommended default).
+     * Do not set this bit. */
     I2C1->CR1 = 0;
     I2C1->CR1 |= I2C_CR1_PE;
 }

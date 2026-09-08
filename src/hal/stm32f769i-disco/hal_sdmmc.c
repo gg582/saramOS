@@ -30,18 +30,17 @@
  * 168 MHz to 216 MHz when hal_sys.c was updated to match Zephyr's SDRAM
  * clock reference (216/168 = 1.2857x).
  *
- * SDIO_CK = SDIOCLK / (CLKDIV + 2) (BYPASS=0, NEGEDGE=0). The "fast"
- * divisor here used to be scaled to keep the *pre-existing* target
- * frequency across that SYSCLK change (DIV=1 @ 168 MHz -> 56 MHz;
- * DIV=2 @ 216 MHz -> 54 MHz), but that pre-existing target was itself
- * already out of spec: SD "Default Speed" tops out at 25 MHz, and
- * "High Speed" (up to 50 MHz) requires switching the card into it via
- * CMD6 first, which this driver never does. Running sustained transfers
- * near 54 MHz without that negotiation is a plausible cause of the
- * SD FIFO simply stopping mid-transfer under real load (confirmed via
- * debugger: a task got stuck forever in sdmmc_fifo_read()'s poll loop,
- * see that function's comment and sdmmc_write_block()'s bounded
- * timeout fix). DIV=7 targets a spec-compliant ~24 MHz instead. */
+ * SDIO_CK = SDIOCLK / (CLKDIV + 2) (BYPASS=0, NEGEDGE=0). DIV=7 here
+ * targets a spec-compliant ~24 MHz ("Default Speed", which tops out at
+ * 25 MHz -- "High Speed", up to 50 MHz, requires first switching the
+ * card into it via CMD6, which this driver never does). A higher clock
+ * (DIV=2, ~54 MHz -- already out of spec, run unintentionally at one
+ * point when SYSCLK moved from 168 to 216 MHz and this divisor was
+ * scaled to keep the same SDIO_CK as before rather than checked against
+ * spec) is a plausible cause of the SD FIFO simply stopping mid-
+ * transfer under real load (confirmed via debugger: a task got stuck
+ * forever in sdmmc_fifo_read()'s poll loop -- see that function's
+ * bounded-timeout fix above). */
 #define SDMMC_CLK_SLOW_DIV  26U   /* was 20 @ 168 MHz */
 #define SDMMC_CLK_FAST_DIV  7U    /* ~24 MHz @ 216 MHz -- spec-compliant Default Speed */
 
@@ -265,18 +264,23 @@ static int sdmmc_set_bus_width_4bit(void)
     return HAL_SDMMC_OK;
 }
 
-/* Per-word FIFO poll timeout. These loops used to spin with no bound at
- * all -- if the card ever stopped delivering FIFO data mid-transfer
- * (confirmed happening in practice: PC sampled here repeatedly via
- * debugger while the board was hung), the calling task would be stuck
- * forever with no way out. Whichever task that happens to be blocks
- * completely from that point on -- when it was net_task (ETH/lwIP
- * servicing, see main.c), the entire network stack died silently: the
- * CLI kept working fine (different task), but no new connections, no
- * DHCP renewal, nothing, ever again, with no crash or error logged
- * anywhere to explain why. A bounded timeout turns that into a single
- * failed read/write instead. */
-#define SDMMC_FIFO_WORD_TIMEOUT 200000U
+/* Per-word FIFO poll timeout: each word must show RXFIFOHF/RXDAVL (read)
+ * or TXFIFOHE (write) within this many polling iterations, or the call
+ * fails instead of spinning forever if the card stops responding
+ * mid-transfer. hal_sdmmc_read_blocks()/write_blocks() then retry the
+ * whole block a few times (see SDMMC_BLOCK_RETRY_MAX below) rather than
+ * treating one bad word as fatal.
+ *
+ * Sized against the ~24 MHz SDIO_CK this driver runs at (see
+ * SDMMC_CLK_FAST_DIV above): a word genuinely arriving takes on the
+ * order of 1-2 microseconds, so 20000 iterations (order of a few
+ * hundred microseconds of CPU-side polling) is already generous
+ * headroom, while still failing a truly stuck transfer quickly -- a
+ * timeout budget of, say, 100+ ms per word here would make each bad
+ * sector expensive enough that a handful of them during one image's
+ * worth of row reads could turn a single upload into a multi-minute
+ * operation once retries are factored in. */
+#define SDMMC_FIFO_WORD_TIMEOUT 20000U
 
 static int sdmmc_fifo_read(uint8_t *buf, uint32_t words)
 {
