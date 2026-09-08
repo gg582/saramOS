@@ -175,6 +175,9 @@ typedef struct {
 
 #define SDMMC_CLKCR_CLKEN           (1U << 8)
 #define SDMMC_CLKCR_WIDBUS_Pos      11U
+#define SDMMC_CLKCR_WIDBUS_1BIT     (0U << SDMMC_CLKCR_WIDBUS_Pos)
+#define SDMMC_CLKCR_WIDBUS_4BIT     (1U << SDMMC_CLKCR_WIDBUS_Pos)
+#define SDMMC_CLKCR_WIDBUS_Msk      (3U << SDMMC_CLKCR_WIDBUS_Pos)
 
 #define SDMMC_CMD_CPSMEN            (1U << 10)
 #define SDMMC_CMD_CMDINDEX_Pos      0U

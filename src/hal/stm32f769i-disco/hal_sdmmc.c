@@ -10,8 +10,13 @@
  *   PB4  -> SDMMC2_D3  (AF10)
  *   PI15 -> SD_DETECT  (input, active-low)
  *
- * Bring-up uses 1-bit mode until the card is selected, then switches to
- * 4-bit mode for better throughput.  The driver is polling-only.
+ * 4-bit mode (ACMD6 + CLKCR WIDBUS) is implemented and self-verifying
+ * (see sdmmc_set_bus_width_4bit() and HAL_SDMMC_ATTEMPT_4BIT in
+ * hal_sdmmc_init()) but disabled by default: PB3/PB4 (D2/D3) share the
+ * debug/trace port, and driving them at SDMMC speed measurably degrades
+ * RMII Ethernet reliability on this board (confirmed by A/B test --
+ * see the comment at HAL_SDMMC_ATTEMPT_4BIT). Stays in 1-bit mode.
+ * The driver is polling-only (no DMA).
  */
 
 #include <hal/hal_sdmmc.h>
@@ -214,8 +219,9 @@ static int sdmmc_wait_card_ready(uint32_t timeout_us)
     return HAL_SDMMC_TIMEOUT;
 }
 
-/* Reserved for 4-bit mode debugging: switch to 4-bit bus via ACMD6. */
-#if 0
+/* ACMD wrapper: CMD55 (APP_CMD) targeting the selected card's RCA,
+ * immediately followed by the application command itself -- required
+ * for ACMD6 (SET_BUS_WIDTH) below. */
 static int sdmmc_send_acmd(uint8_t acmd, uint32_t arg, uint32_t *resp)
 {
     uint32_t r;
@@ -224,7 +230,30 @@ static int sdmmc_send_acmd(uint8_t acmd, uint32_t arg, uint32_t *resp)
         return rc;
     return sdmmc_send_cmd_raw(acmd, arg, 1, resp);
 }
-#endif
+
+/* Switch the card + SDMMC2 peripheral to 4-bit bus mode. Must be called
+ * with the card already selected (after CMD7) and the bus still in
+ * 1-bit mode. ACMD6 argument bits [1:0]: 00 = 1-bit, 10 = 4-bit (bit 1
+ * set, bit 0 clear -- i.e. value 2). The card switches essentially
+ * immediately on a successful R1 response; only the peripheral side
+ * (CLKCR WIDBUS) needs a subsequent register write to match. */
+static int sdmmc_set_bus_width_4bit(void)
+{
+    uint32_t r1;
+    int rc = sdmmc_send_acmd(6, 0x2U, &r1);
+    if (rc != HAL_SDMMC_OK)
+        return rc;
+    /* R1 card status: bits [31:24] mostly error flags (OUT_OF_RANGE,
+     * ADDRESS_ERROR, ..., COM_CRC_ERROR, ILLEGAL_COMMAND). Anything set
+     * there past the fact that sdmmc_send_cmd_raw() already validated
+     * the response CRC means the card rejected the switch. */
+    if (r1 & 0xFFF80000U)
+        return HAL_SDMMC_ERR;
+
+    SDMMC2->CLKCR = (SDMMC2->CLKCR & ~SDMMC_CLKCR_WIDBUS_Msk) | SDMMC_CLKCR_WIDBUS_4BIT;
+    sd_delay(1000);
+    return HAL_SDMMC_OK;
+}
 
 static void sdmmc_fifo_read(uint8_t *buf, uint32_t words)
 {
@@ -472,9 +501,50 @@ int hal_sdmmc_init(void)
     if (rc != HAL_SDMMC_OK)
         return rc;
 
-    /* Raise clock to fast speed in 1-bit bus mode.
-     * 4-bit mode works through ACMD6 on this socket but has shown
-     * data-read failures on some cards; keep 1-bit until it is debugged. */
+    /* 4-bit bus (ACMD6 + CLKCR WIDBUS) is implemented and does work on
+     * its own terms -- sdmmc_set_bus_width_4bit() + a real block-0 read
+     * (checking the AA55 boot-sector signature) confirm the SD side is
+     * completely fine in 4-bit mode. The reason it's disabled by
+     * default is a different, unexpected finding: PB3/PB4 (D2/D3) are
+     * shared with the debug/trace port, and driving them at SDMMC
+     * speed measurably degrades RMII Ethernet reliability on this
+     * board -- confirmed by direct A/B test (see git history for this
+     * comment): with HAL_SDMMC_ATTEMPT_4BIT on, DHCP got stuck in
+     * SELECTING with the RX path throwing errors on every single
+     * frame, surviving even a full power cycle; flipping this back to
+     * 0 (1-bit) with no other change and reflashing fixed it
+     * immediately, no power cycle needed. Since apps/drop-a-file (an
+     * HTTP upload app) needs networking far more than it needs faster
+     * SD writes, 1-bit stays the default. Flip this on only for a
+     * board/app combination that doesn't need Ethernet at the same
+     * time as the SD card. */
+#define HAL_SDMMC_ATTEMPT_4BIT 0
+#if HAL_SDMMC_ATTEMPT_4BIT
+    rc = sdmmc_set_bus_width_4bit();
+#else
+    rc = HAL_SDMMC_ERR;
+    (void)sdmmc_set_bus_width_4bit;
+#endif
+    if (rc == HAL_SDMMC_OK) {
+        sdmmc_set_clock(SDMMC_CLK_FAST_DIV);
+
+        uint8_t probe[HAL_SDMMC_BLOCK_SIZE];
+        rc = sdmmc_read_block(0, probe);
+        if (rc == HAL_SDMMC_OK && probe[510] == 0x55U && probe[511] == 0xAAU) {
+            hal_uart_puts("[SD] init complete (4-bit fast, LBA0 sig verified)\r\n");
+            sd_initialized = 1;
+            return HAL_SDMMC_OK;
+        }
+
+        hal_uart_puts("[SD] 4-bit mode LBA0 verify failed -- falling back to 1-bit\r\n");
+        SDMMC2->CLKCR = (SDMMC2->CLKCR & ~SDMMC_CLKCR_WIDBUS_Msk) | SDMMC_CLKCR_WIDBUS_1BIT;
+        (void)sdmmc_send_acmd(6, 0x0U, &r); /* tell the card to go back to 1-bit too */
+    } else {
+        hal_uart_puts("[SD] ACMD6 (4-bit) rejected -- staying in 1-bit\r\n");
+    }
+
+    /* Raise clock to fast speed in 1-bit bus mode (either 4-bit was
+     * never attempted successfully, or it failed verification above). */
     sdmmc_set_clock(SDMMC_CLK_FAST_DIV);
     hal_uart_puts("[SD] init complete (1-bit fast)\r\n");
     sd_initialized = 1;
