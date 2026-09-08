@@ -51,9 +51,32 @@ static struct pbuf *low_level_input(void)
     int rc;
     struct pbuf *p;
 
-    rc = hal_eth_rx(buf, sizeof(buf), &len);
+    /* hal_eth_rx() returns 0 for "no packet pending" but a negative
+     * value for "this one descriptor's frame had an error" (already
+     * re-owned/skipped internally by hal_eth_rx() itself). Those are
+     * not the same thing: only 0 means the ring is genuinely drained.
+     * Treating them the same here used to make ethernetif_input()'s
+     * drain loop (below) stop at the very first bad frame in a call,
+     * even when a good frame -- potentially the DHCP OFFER everything
+     * is waiting on -- was sitting right behind it in the ring. With
+     * HAL_ETH_RX_DESC_COUNT only 8 descriptors and any real-world LAN
+     * carrying a steady trickle of broadcast/multicast noise (ARP,
+     * mDNS, IPv6 neighbor discovery, ...), that could stall DHCP
+     * indefinitely if an OFFER never happened to land first in a
+     * burst. Skip over errored frames here instead of bailing out. */
+    for (int skip_budget = 32; skip_budget > 0; skip_budget--) {
+        rc = hal_eth_rx(buf, sizeof(buf), &len);
+        if (rc == 0)
+            return NULL; /* ring genuinely empty */
+        if (rc > 0)
+            break; /* got a real frame */
+        /* rc < 0: this descriptor's frame errored and was already
+         * skipped by hal_eth_rx() -- try the next one, up to the
+         * budget above (bounds worst-case time here if incoming
+         * frames keep erroring faster than we can drain them). */
+    }
     if (rc <= 0)
-        return NULL;
+        return NULL; /* skip budget exhausted without a good frame */
 
     p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_POOL);
     if (p != NULL) {
