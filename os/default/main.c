@@ -887,6 +887,60 @@ static void cli_sd_inspect(void)
     snprintf(buf, sizeof(buf), "  capacity blocks: %lu\r\n",
              (unsigned long)hal_sdmmc_get_sector_count());
     hal_uart_puts(buf);
+
+    /* Raw LBA0 dump -- diagnoses "mount failed (13)/(1)" (FatFS can't
+     * find a filesystem) by showing exactly what's actually there:
+     * MBR (partition table + 0x55AA at offset 510), a GPT protective
+     * MBR (single 0xEE partition type byte at offset 450), or a raw/
+     * superfloppy FAT/exFAT boot sector (starts "EXFAT   " or has a
+     * jump instruction + OEM name at offset 0-10), or something else
+     * entirely (freshly zeroed card, wrong sector being read, ...). */
+    {
+        uint8_t lba0[HAL_SDMMC_BLOCK_SIZE];
+        int rc = hal_sdmmc_read_blocks(0, lba0, 1);
+        if (rc != 0) {
+            snprintf(buf, sizeof(buf), "  LBA0 read: FAILED (rc=%d)\r\n", rc);
+            hal_uart_puts(buf);
+        } else {
+            snprintf(buf, sizeof(buf), "  LBA0[0:16):   %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X\r\n",
+                     lba0[0], lba0[1], lba0[2], lba0[3], lba0[4], lba0[5], lba0[6], lba0[7],
+                     lba0[8], lba0[9], lba0[10], lba0[11], lba0[12], lba0[13], lba0[14], lba0[15]);
+            hal_uart_puts(buf);
+            snprintf(buf, sizeof(buf), "  LBA0[446:462) (partition entry 1): %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X\r\n",
+                     lba0[446], lba0[447], lba0[448], lba0[449], lba0[450], lba0[451], lba0[452], lba0[453],
+                     lba0[454], lba0[455], lba0[456], lba0[457], lba0[458], lba0[459], lba0[460], lba0[461]);
+            hal_uart_puts(buf);
+            snprintf(buf, sizeof(buf), "  LBA0[510:512) (boot sig, want 55 AA): %02X %02X\r\n",
+                     lba0[510], lba0[511]);
+            hal_uart_puts(buf);
+
+            /* Partition 1's LBA start (little-endian u32 at entry+8) --
+             * read *that* sector too: this is the actual FAT32 VBR
+             * FatFS's find_volume() needs, one level past LBA0. */
+            uint32_t p1_lba = (uint32_t)lba0[454] | ((uint32_t)lba0[455] << 8) |
+                               ((uint32_t)lba0[456] << 16) | ((uint32_t)lba0[457] << 24);
+            snprintf(buf, sizeof(buf), "  partition 1 LBA start: %lu\r\n", (unsigned long)p1_lba);
+            hal_uart_puts(buf);
+
+            if (p1_lba != 0) {
+                uint8_t vbr[HAL_SDMMC_BLOCK_SIZE];
+                int rc2 = hal_sdmmc_read_blocks(p1_lba, vbr, 1);
+                if (rc2 != 0) {
+                    snprintf(buf, sizeof(buf), "  VBR@%lu read: FAILED (rc=%d)\r\n",
+                             (unsigned long)p1_lba, rc2);
+                    hal_uart_puts(buf);
+                } else {
+                    snprintf(buf, sizeof(buf), "  VBR[0:16):    %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X\r\n",
+                             vbr[0], vbr[1], vbr[2], vbr[3], vbr[4], vbr[5], vbr[6], vbr[7],
+                             vbr[8], vbr[9], vbr[10], vbr[11], vbr[12], vbr[13], vbr[14], vbr[15]);
+                    hal_uart_puts(buf);
+                    snprintf(buf, sizeof(buf), "  VBR[510:512) (boot sig, want 55 AA): %02X %02X\r\n",
+                             vbr[510], vbr[511]);
+                    hal_uart_puts(buf);
+                }
+            }
+        }
+    }
 }
 
 static void cli_sd_ls(const char *path)
@@ -1939,9 +1993,24 @@ int main(void)
 
     /* ETH/lwIP servicing as its own TCB task, same priority as the
      * scheduler task above so SysTick's round-robin alternates them
-     * every tick -- see net_task_entry()'s comment for the "why". */
+     * every tick -- see net_task_entry()'s comment for the "why".
+     *
+     * 2048 bytes was enough when this task only drained the RX ring,
+     * but ethernetif_input() synchronously drives the *entire* call
+     * chain from raw frame up through lwIP's TCP/IP stack into
+     * whatever the app's recv/POST callbacks do -- for apps/drop-a-file
+     * specifically, that chain reaches into httpd's internals, FatFS
+     * (f_open/f_read/f_write with their own local buffers), and BMP
+     * decode/scale/draw locals (a 138-byte header buffer, a couple of
+     * 128-byte debug-format buffers, ...), all stacked on top of each
+     * other in one synchronous call. 2048 was not enough headroom for
+     * that: observed as uploads that "succeeded" once and then reset
+     * every connection after (NS_ERROR_NET_RESET) with no further ETH
+     * activity logged at all -- the exact signature of this task
+     * stack-overflowing and getting killed by the fault handler.
+     * 8192 gives real headroom for that whole chain. */
     {
-        static uint8_t net_task_stack[2048];
+        static uint8_t net_task_stack[8192];
         static saramos_tcb_t net_task_tcb;
 
         saramos_task_init(&net_task_tcb, 2, net_task_entry,
