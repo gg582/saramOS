@@ -269,13 +269,25 @@ int hal_eth_init(const uint8_t *mac_addr)
     /* DMA interrupts (optional) */
     ETH->DMAIER = ETH_DMAIER_NISE | ETH_DMAIER_RIE;
 
-    /* Enable MAC receiver/transmitter after PHY is ready */
-    ETH->CR |= ETH_MACCR_RE | ETH_MACCR_TE;
-
-    /* Initialize PHY and read negotiated speed/duplex */
+    /* Initialize PHY and read negotiated speed/duplex *before* the MAC
+     * receiver/transmitter are enabled -- RE/TE used to be set above,
+     * ahead of phy_init(), which left the MAC actively trying to
+     * receive while the PHY was still mid soft-reset/autonegotiation.
+     * That looked exactly like a cold-power-cycle-only bug: frames
+     * received during the PHY's unstable transition window could set
+     * a descriptor's error flags, and everything downstream (DHCP
+     * timing out in SELECTING, sporadic single-bit-corrupted frames
+     * logged as "[ETH] RX ES error!") followed from there, but only
+     * after a warm reset -- a cold power-up gives the PHY's own
+     * crystal/PLL time to settle before this code ever runs, so the
+     * same ordering bug never got exercised in that path. */
     if (phy_init() != 0)
         return -2;
     read_phy_speed_duplex();
+
+    /* Only now start the MAC actually receiving/transmitting, with the
+     * PHY link already confirmed up and autonegotiation complete. */
+    ETH->CR |= ETH_MACCR_RE | ETH_MACCR_TE;
 
     /* Resume DMA receive */
     ETH->DMARPDR = 0;
