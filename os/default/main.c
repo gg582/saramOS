@@ -76,7 +76,8 @@ static void cli_help(void)
         "  reset      - Reset current arena generation\r\n"
         "  rotate     - Rotate arena to new generation\r\n"
         "  hello      - Print hello message\r\n"
-        "  heartbeat  - Print heartbeat once\r\n"
+        "  heartbeat  - Print heartbeat once; 'heartbeat on'/'off' toggles\r\n"
+        "               the once-a-second RTOS demo heartbeat log (off by default)\r\n"
         "  program    - Create/list/run calculator programs\r\n"
         "  clear      - Clear screen\r\n"
         "  net init   - Initialize Ethernet and start DHCP\r\n"
@@ -211,9 +212,23 @@ static void cli_hello(void)
     hal_uart_puts("Hello from saramOS!\r\n");
 }
 
-static void cli_heartbeat(void)
+/* Controls whether the RTOS demo heartbeat task (see heartbeat_task_entry()
+ * below) prints to UART every second. Off by default -- it exists to prove
+ * genuine concurrent TCB scheduling works, which it did; left always-on it
+ * just interrupts whatever you're typing at the CLI every second. */
+static volatile int g_heartbeat_verbose = 0;
+
+static void cli_heartbeat(const char *arg)
 {
-    hal_uart_puts("Heartbeat from saramOS\r\n");
+    if (arg && strcmp(arg, "on") == 0) {
+        g_heartbeat_verbose = 1;
+        hal_uart_puts("heartbeat: verbose RTOS heartbeat prints ON\r\n");
+    } else if (arg && strcmp(arg, "off") == 0) {
+        g_heartbeat_verbose = 0;
+        hal_uart_puts("heartbeat: verbose RTOS heartbeat prints OFF\r\n");
+    } else {
+        hal_uart_puts("Heartbeat from saramOS\r\n");
+    }
 }
 
 static void skip_spaces(const char **s)
@@ -634,7 +649,10 @@ static void cli_program(const char *arg)
     program_edit(arg);
 }
 
-static void cli_net_init(void)
+/* Not static: apps can call this directly from app_register_commands()
+ * to auto-start networking on boot instead of requiring the user to
+ * type "net init" -- see apps/drop-a-file for the motivating case. */
+void cli_net_init(void)
 {
     ip4_addr_t ipaddr, netmask, gw;
 
@@ -766,7 +784,8 @@ static void cli_net_show_ipv6(void)
 #endif
 }
 
-static void cli_http_start(void)
+/* Not static -- same reasoning as cli_net_init() above. */
+void cli_http_start(void)
 {
 #if LWIP_HTTPD
     httpd_init();
@@ -776,7 +795,8 @@ static void cli_http_start(void)
 #endif
 }
 
-static void cli_sd_init(void)
+/* Not static -- same reasoning as cli_net_init() above. */
+void cli_sd_init(void)
 {
     FRESULT fr;
     char buf[64];
@@ -1680,7 +1700,7 @@ static void cli_execute(char *line)
     } else if (strcmp(line, "hello") == 0) {
         cli_hello();
     } else if (strcmp(line, "heartbeat") == 0) {
-        cli_heartbeat();
+        cli_heartbeat(arg);
     } else if (strcmp(line, "program") == 0) {
         cli_program(arg);
     } else if (strcmp(line, "clear") == 0) {
@@ -1729,14 +1749,11 @@ static void cli_read_line(char *buf, size_t size)
     }
 }
 
-/* Scheduler housekeeping hook: drive lwIP and libttak background tasks. */
+/* Scheduler housekeeping hook: drive libttak background tasks. lwIP/ETH
+ * polling used to live here too, but moved to its own preemptive TCB
+ * task (net_task_entry() below) -- see that function's comment for why. */
 void saramos_sched_housekeeping(void)
 {
-    if (net_initialized) {
-        ethernetif_input(&gnetif);
-        sys_check_timeouts();
-        hal_eth_poll();
-    }
     ttak_cooperative_run_once(ttak_get_tick_count());
 }
 
@@ -1784,6 +1801,45 @@ static void saramos_sched_run_task_entry(void *arg)
     saramos_sched_run();
 }
 
+/* Dedicated preemptive TCB task for ETH/lwIP servicing -- was previously
+ * called from saramos_sched_housekeeping(), i.e. once per iteration of
+ * the *cooperative* scheduler's own loop. That loop runs one process
+ * step per iteration before coming back around to housekeeping, and a
+ * single step can legitimately run long (e.g. apps/drop-a-file's
+ * httpd_post_receive_data() doing a synchronous f_write() to SD per
+ * pbuf) -- for however long that one step takes, incoming frames just
+ * pile up in the 8-entry RX descriptor ring un-drained. Real-world LAN
+ * background multicast traffic (mDNS/IGMP, observed roughly every
+ * 100-500ms) was enough to occasionally overrun that ring during a slow
+ * step, which showed up as "[ETH] RX ES error!" on frames that were
+ * otherwise perfectly valid (confirmed: some had valid-looking IPv4
+ * headers with IP options, not corrupted content) and, worse, could
+ * stall DHCP in SELECTING indefinitely if the ring stayed backed up
+ * through several retries.
+ *
+ * Running this as its own TCB task, same priority as the cooperative-
+ * scheduler task below, means SysTick's round-robin (see
+ * saramos_schedule()) alternates the two every tick (1ms) regardless of
+ * how long any single cooperative step takes -- ETH now gets serviced
+ * on the order of milliseconds even while the CLI/httpd/SD-write side
+ * is busy, not "whenever that side happens to loop back around".
+ *
+ * net_initialized is main()'s own static flag, flipped by cli_net_init()
+ * (called from apps/drop-a-file's auto-start, or the "net init" CLI
+ * command) -- this task just waits for it, spinning harmlessly (same
+ * as sched_task's own loop below) until networking actually exists. */
+static void net_task_entry(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        if (net_initialized) {
+            ethernetif_input(&gnetif);
+            sys_check_timeouts();
+            hal_eth_poll();
+        }
+    }
+}
+
 /* saramos_heartbeat_sem is defined in hal_sys.c and posted once a
  * second from SysTick_Handler -- ISR-safe, per saramos_sem_post()'s own
  * contract. This task is the other half: it blocks on
@@ -1805,10 +1861,12 @@ static void heartbeat_task_entry(void *arg)
     for (;;) {
         saramos_sem_wait(&saramos_heartbeat_sem);
         count++;
-        char buf[48];
-        snprintf(buf, sizeof(buf), "[RTOS] heartbeat #%lu (t=%lums)\r\n",
-                 (unsigned long)count, (unsigned long)saramos_tick_ms);
-        hal_uart_puts(buf);
+        if (g_heartbeat_verbose) {
+            char buf[48];
+            snprintf(buf, sizeof(buf), "[RTOS] heartbeat #%lu (t=%lums)\r\n",
+                     (unsigned long)count, (unsigned long)saramos_tick_ms);
+            hal_uart_puts(buf);
+        }
     }
 }
 
@@ -1877,6 +1935,19 @@ int main(void)
                           NULL, sched_task_stack, sizeof(sched_task_stack),
                           100U, NULL, NULL);
         saramos_task_add(&sched_task_tcb);
+    }
+
+    /* ETH/lwIP servicing as its own TCB task, same priority as the
+     * scheduler task above so SysTick's round-robin alternates them
+     * every tick -- see net_task_entry()'s comment for the "why". */
+    {
+        static uint8_t net_task_stack[2048];
+        static saramos_tcb_t net_task_tcb;
+
+        saramos_task_init(&net_task_tcb, 2, net_task_entry,
+                          NULL, net_task_stack, sizeof(net_task_stack),
+                          100U, NULL, NULL);
+        saramos_task_add(&net_task_tcb);
     }
 
     /* Second real TCB task -- demonstrates genuine concurrent tasks
