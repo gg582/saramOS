@@ -46,6 +46,7 @@ err_t low_level_output(struct netif *netif, struct pbuf *p)
 
 static struct pbuf *low_level_input(void)
 {
+    extern void hal_uart_puts(const char *s);
     uint8_t buf[1524];
     size_t len = 0;
     int rc;
@@ -78,6 +79,41 @@ static struct pbuf *low_level_input(void)
     if (rc <= 0)
         return NULL; /* skip budget exhausted without a good frame */
 
+    /* Packet sniffer for diagnosis -- gated on saramos_eth_verbose
+     * (defined in hal_eth.c, toggled with "eth on"/"eth off"), same as
+     * the RX/TX packet prints in that file. */
+    extern volatile int saramos_eth_verbose;
+    if (saramos_eth_verbose && len >= 14) {
+        uint16_t etype = ((uint16_t)buf[12] << 8) | buf[13];
+        if (etype == 0x0806) {
+            hal_uart_puts("[ETH] RX ARP\r\n");
+        } else if (etype == 0x0800 && len >= 42) {
+            uint8_t proto = buf[23];
+            if (proto == 17) { /* UDP */
+                uint16_t sport = ((uint16_t)buf[34] << 8) | buf[35];
+                uint16_t dport = ((uint16_t)buf[36] << 8) | buf[37];
+                if (sport == 67 && dport == 68) {
+                    char dbg[64];
+                    uint8_t msg_type = 0;
+                    /* Search for DHCP option 53 (Message Type) in DHCP payload (offset 278) */
+                    if (len >= 282 && buf[278] == 0x63 && buf[279] == 0x82 && buf[280] == 0x53 && buf[281] == 0x63) {
+                        for (size_t opt = 282; opt + 2 < len && buf[opt] != 255; ) {
+                            if (buf[opt] == 0) { opt++; continue; }
+                            if (buf[opt] == 53 && buf[opt + 1] == 1) {
+                                msg_type = buf[opt + 2];
+                                break;
+                            }
+                            opt += 2 + buf[opt + 1];
+                        }
+                    }
+                    const char *tname = (msg_type == 2) ? "OFFER" : (msg_type == 5) ? "ACK" : (msg_type == 6) ? "NAK" : "OTHER";
+                    __builtin_sprintf(dbg, "[ETH] RX DHCP %s (type=%d, len=%u)\r\n", tname, (int)msg_type, (unsigned)len);
+                    hal_uart_puts(dbg);
+                }
+            }
+        }
+    }
+
     p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_POOL);
     if (p != NULL) {
         pbuf_take(p, buf, (u16_t)len);
@@ -106,13 +142,25 @@ void ethernetif_input(struct netif *netif)
 
 err_t low_level_init(struct netif *netif)
 {
+    extern void hal_uart_puts(const char *s);
+
+    int rc = hal_eth_init(NULL);
+    if (rc != 0) {
+        char dbg[64];
+        __builtin_sprintf(dbg, "[ETH] hal_eth_init failed: %d\r\n", rc);
+        hal_uart_puts(dbg);
+    } else {
+        hal_uart_puts("[ETH] hal_eth_init OK\r\n");
+    }
+
+    /* Retrieve unique UID-based MAC from HAL */
+    hal_eth_get_mac_addr(eth_mac_addr);
+
     netif->hwaddr_len = ETHARP_HWADDR_LEN;
     memcpy(netif->hwaddr, eth_mac_addr, ETHARP_HWADDR_LEN);
 
     netif->mtu = 1500;
     netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_LINK_UP;
-
-    hal_eth_init(eth_mac_addr);
 
     return ERR_OK;
 }

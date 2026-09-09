@@ -16,6 +16,14 @@
  * PI10 -> RX_ER     (AF11) - optional
  */
 
+/* Controls the "[ETH] ..." per-packet/per-error UART prints in this
+ * file and in os/default/ethernetif.c (which shares this flag via
+ * extern). Off by default -- at normal traffic rates these fire often
+ * enough to make the CLI unusable, the same reasoning as the RTOS
+ * heartbeat task's "heartbeat on/off" toggle in main.c. Toggle with
+ * the "eth on"/"eth off" CLI command. */
+volatile int saramos_eth_verbose = 0;
+
 static eth_dma_desc_t tx_desc[HAL_ETH_TX_DESC_COUNT] __attribute__((aligned(4)));
 static eth_dma_desc_t rx_desc[HAL_ETH_RX_DESC_COUNT] __attribute__((aligned(4)));
 static uint8_t tx_buf[HAL_ETH_TX_DESC_COUNT][HAL_ETH_BUF_SIZE] __attribute__((aligned(32)));
@@ -62,7 +70,7 @@ static void smii_write(uint32_t phy, uint32_t reg, uint16_t val)
     ETH->MIIDR = val;
     ETH->MIIAR = (phy << ETH_MACMIIAR_PA_Pos) |
                  (reg << ETH_MACMIIAR_MR_Pos) |
-                 ETH_MACMIIAR_CR_DIV16 |
+                 ETH_MACMIIAR_CR_DIV102 |
                  ETH_MACMIIAR_MW |
                  ETH_MACMIIAR_MB;
     while (ETH->MIIAR & ETH_MACMIIAR_MB)
@@ -75,7 +83,7 @@ static uint16_t smii_read(uint32_t phy, uint32_t reg)
         ;
     ETH->MIIAR = (phy << ETH_MACMIIAR_PA_Pos) |
                  (reg << ETH_MACMIIAR_MR_Pos) |
-                 ETH_MACMIIAR_CR_DIV16 |
+                 ETH_MACMIIAR_CR_DIV102 |
                  ETH_MACMIIAR_MB;
     while (ETH->MIIAR & ETH_MACMIIAR_MB)
         ;
@@ -90,22 +98,22 @@ static void configure_rmii_pins(void)
                    RCC_AHB1ENR_GPIOCEN |
                    RCC_AHB1ENR_GPIOGEN;
 
-    /* PA1 REF_CLK, PA2 MDIO, PA7 CRS_DV */
-    hal_gpio_init_af(GPIOA_BASE, 1, 11, GPIO_SPEED_HIGH, GPIO_PUPD_NONE);
-    hal_gpio_init_af(GPIOA_BASE, 2, 11, GPIO_SPEED_HIGH, GPIO_PUPD_NONE);
-    hal_gpio_init_af(GPIOA_BASE, 7, 11, GPIO_SPEED_HIGH, GPIO_PUPD_NONE);
+    /* PA1 REF_CLK, PA7 CRS_DV */
+    hal_gpio_init_af(GPIOA_BASE, 1, 11, GPIO_SPEED_VERY_HIGH, GPIO_PUPD_NONE);
+    hal_gpio_init_af(GPIOA_BASE, 7, 11, GPIO_SPEED_VERY_HIGH, GPIO_PUPD_NONE);
 
-    /* PB13 TXD1 */
-    hal_gpio_init_af(GPIOB_BASE, 13, 11, GPIO_SPEED_HIGH, GPIO_PUPD_NONE);
+    /* PA2 MDIO (Open-Drain, requires pull-up) */
+    hal_gpio_init_af(GPIOA_BASE, 2, 11, GPIO_SPEED_VERY_HIGH, GPIO_PUPD_UP);
 
     /* PC1 MDC, PC4 RXD0, PC5 RXD1 */
-    hal_gpio_init_af(GPIOC_BASE, 1, 11, GPIO_SPEED_HIGH, GPIO_PUPD_NONE);
-    hal_gpio_init_af(GPIOC_BASE, 4, 11, GPIO_SPEED_HIGH, GPIO_PUPD_NONE);
-    hal_gpio_init_af(GPIOC_BASE, 5, 11, GPIO_SPEED_HIGH, GPIO_PUPD_NONE);
+    hal_gpio_init_af(GPIOC_BASE, 1, 11, GPIO_SPEED_VERY_HIGH, GPIO_PUPD_NONE);
+    hal_gpio_init_af(GPIOC_BASE, 4, 11, GPIO_SPEED_VERY_HIGH, GPIO_PUPD_NONE);
+    hal_gpio_init_af(GPIOC_BASE, 5, 11, GPIO_SPEED_VERY_HIGH, GPIO_PUPD_NONE);
 
-    /* PG13 TXD0, PG14 TX_EN */
-    hal_gpio_init_af(GPIOG_BASE, 13, 11, GPIO_SPEED_HIGH, GPIO_PUPD_NONE);
-    hal_gpio_init_af(GPIOG_BASE, 14, 11, GPIO_SPEED_HIGH, GPIO_PUPD_NONE);
+    /* PG11 TX_EN, PG13 TXD0, PG14 TXD1 */
+    hal_gpio_init_af(GPIOG_BASE, 11, 11, GPIO_SPEED_VERY_HIGH, GPIO_PUPD_NONE);
+    hal_gpio_init_af(GPIOG_BASE, 13, 11, GPIO_SPEED_VERY_HIGH, GPIO_PUPD_NONE);
+    hal_gpio_init_af(GPIOG_BASE, 14, 11, GPIO_SPEED_VERY_HIGH, GPIO_PUPD_NONE);
 }
 
 static void set_mac_address(const uint8_t *mac)
@@ -167,7 +175,7 @@ static int phy_init(void)
     smii_write(LAN8742A_PHY_ADDR, PHY_BCR, bcr | PHY_BCR_ANEG_RST);
 
     /* Wait for link up and auto-negotiation complete */
-    timeout = 1000000;
+    timeout = 100000;
     while (timeout--) {
         bsr = smii_read(LAN8742A_PHY_ADDR, PHY_BSR);
         if ((bsr & (PHY_BSR_LINK_UP | PHY_BSR_ANEG_CMPLT)) ==
@@ -175,18 +183,24 @@ static int phy_init(void)
             break;
         }
     }
-    if (timeout == 0)
-        return -2;
 
-    eth_link_up = 1;
+    bsr = smii_read(LAN8742A_PHY_ADDR, PHY_BSR);
+    eth_link_up = (bsr & PHY_BSR_LINK_UP) ? 1 : 0;
     return 0;
 }
 
 static void read_phy_speed_duplex(void)
 {
     uint16_t scsr = smii_read(LAN8742A_PHY_ADDR, PHY_SCSR);
-    int speed100 = ((scsr >> PHY_SCSR_SPEED_Pos) & 3U) >= 2U;
-    int full_duplex = (scsr & PHY_SCSR_DUPLEX) ? 1 : 0;
+    /* bits [4:2] of SCSR indicate the HCD speed:
+     * 001: 10Base-T half-duplex
+     * 101: 10Base-T full-duplex
+     * 010: 100Base-TX half-duplex
+     * 110: 100Base-TX full-duplex
+     */
+    uint32_t hcd = (scsr >> 2) & 7U;
+    int speed100 = (hcd == 2 || hcd == 6);
+    int full_duplex = (hcd == 5 || hcd == 6);
 
     uint32_t maccr = ETH->CR;
     maccr &= ~(ETH_MACCR_FES | ETH_MACCR_DM);
@@ -197,6 +211,14 @@ static void read_phy_speed_duplex(void)
     ETH->CR = maccr;
 }
 
+void hal_eth_get_mac_addr(uint8_t *mac)
+{
+    if (!mac)
+        return;
+    for (int i = 0; i < 6; i++)
+        mac[i] = eth_mac_addr[i];
+}
+
 int hal_eth_init(const uint8_t *mac_addr)
 {
     uint32_t timeout;
@@ -205,23 +227,41 @@ int hal_eth_init(const uint8_t *mac_addr)
         for (int i = 0; i < 6; i++)
             eth_mac_addr[i] = mac_addr[i];
     } else {
-        /* default MAC 02:00:00:00:00:01 */
-        eth_mac_addr[0] = 0x02;
-        eth_mac_addr[1] = 0x00;
-        eth_mac_addr[2] = 0x00;
-        eth_mac_addr[3] = 0x00;
-        eth_mac_addr[4] = 0x00;
-        eth_mac_addr[5] = 0x01;
+        /* Derive unique MAC from STM32F7 UID (0x1FF0F420) */
+        uint32_t uid0 = *(volatile uint32_t *)0x1FF0F420U;
+        uint32_t uid2 = *(volatile uint32_t *)0x1FF0F428U;
+        eth_mac_addr[0] = 0x02; /* Locally Administered */
+        eth_mac_addr[1] = 0x80;
+        eth_mac_addr[2] = 0xE1;
+        eth_mac_addr[3] = (uint8_t)(uid0 ^ (uid0 >> 16));
+        eth_mac_addr[4] = (uint8_t)(uid2 >> 8);
+        eth_mac_addr[5] = (uint8_t)(uid2);
     }
 
-    /* Enable SYSCFG and Ethernet clocks */
+    /* Enable SYSCFG clock */
     RCC_APB2ENR |= RCC_APB2ENR_SYSCFGEN;
+
+    /* Enable I/O Compensation Cell */
+    #define SYSCFG_CMPCR  (*(volatile uint32_t *)0x40013820U)
+    #define SYSCFG_CMPCR_CMP_PD  (1U << 0)
+    #define SYSCFG_CMPCR_READY   (1U << 8)
+    SYSCFG_CMPCR |= SYSCFG_CMPCR_CMP_PD;
+    while (!(SYSCFG_CMPCR & SYSCFG_CMPCR_READY))
+        ;
+
+    /* Select RMII mode (must be configured before enabling Ethernet clocks) */
+    SYSCFG_PMC |= SYSCFG_PMC_MII_RMII_SEL;
+
+    /* Enable Ethernet clocks */
     RCC_AHB1ENR |= RCC_AHB1ENR_ETHMACEN |
                    RCC_AHB1ENR_ETHMACTXEN |
                    RCC_AHB1ENR_ETHMACRXEN;
 
-    /* Select RMII mode */
-    SYSCFG_PMC |= SYSCFG_PMC_MII_RMII_SEL;
+    /* Reset Ethernet peripheral via RCC */
+    RCC_AHB1RSTR |= RCC_AHB1RSTR_ETHMACRST;
+    eth_delay(100);
+    RCC_AHB1RSTR &= ~RCC_AHB1RSTR_ETHMACRST;
+    eth_delay(100);
 
     /* Configure RMII pins */
     configure_rmii_pins();
@@ -250,11 +290,13 @@ int hal_eth_init(const uint8_t *mac_addr)
      * whole frame on ES without distinguishing "genuine CRC/framing
      * error" from "IPCO's checksum engine didn't like this frame's
      * shape" (IP options, certain multicast/IGMP framing, ...) --
-     * repeated "[ETH] RX ES error!" logs were observed on ordinary
-     * mDNS/IGMP background traffic, including frames with entirely
-     * valid-looking IPv4 headers (IP options included). Turning IPCO
-     * off removes that whole false-positive class; lwIP's own software
-     * check still catches anything genuinely bad. */
+     * repeated "[ETH] RX ES error!" logs on ordinary mDNS/IGMP
+     * background traffic, consistently on the exact same byte/bit
+     * every time (not the varying pattern real wire noise would
+     * produce), pointed at exactly this rather than electrical
+     * marginality. Turning IPCO off removes that whole false-positive
+     * class; lwIP's own software check still catches anything
+     * genuinely bad. */
     ETH->CR = ETH_MACCR_APCS |     /* automatic pad/CRC strip */
               ETH_MACCR_IFG_96;
 
@@ -323,15 +365,21 @@ void hal_eth_poll(void)
     static uint32_t poll_count = 0;
     if (++poll_count > 100000) {
         poll_count = 0;
-        int was_up = eth_link_up;
         int up = hal_eth_link_up();
-        if (up && !was_up)
-            read_phy_speed_duplex();
+        eth_link_up = up;
+
+        if (up) {
+            uint16_t bsr = smii_read(LAN8742A_PHY_ADDR, PHY_BSR);
+            if (bsr & PHY_BSR_ANEG_CMPLT) {
+                read_phy_speed_duplex();
+            }
+        }
     }
 }
 
 int hal_eth_tx(const uint8_t *buf, size_t len)
 {
+    extern void hal_uart_puts(const char *s);
     if (len == 0 || len > HAL_ETH_BUF_SIZE)
         return -1;
 
@@ -361,11 +409,14 @@ int hal_eth_tx(const uint8_t *buf, size_t len)
     /* Resume DMA transmission */
     ETH->DMATPDR = 0;
 
+    if (saramos_eth_verbose)
+        hal_uart_puts("[ETH] TX packet\r\n");
     return 0;
 }
 
 int hal_eth_rx(uint8_t *buf, size_t max_len, size_t *out_len)
 {
+    extern void hal_uart_puts(const char *s);
     eth_dma_desc_t *desc = &rx_desc[rx_idx];
 
     if (desc->status & ETH_RDES0_OWN)
@@ -373,6 +424,26 @@ int hal_eth_rx(uint8_t *buf, size_t max_len, size_t *out_len)
 
     uint32_t status = desc->status;
     if (status & ETH_RDES0_ES) {
+        if (saramos_eth_verbose) {
+            char err_dbg[128];
+            uint32_t len = (status >> ETH_RDES0_FL_Pos) & ETH_RDES0_FL_Msk;
+            __builtin_sprintf(err_dbg, "[ETH] RX ES error! status=%08lx len=%d\r\n", status, (int)len);
+            hal_uart_puts(err_dbg);
+
+            scb_inv_dcache((void *)desc->buf1, 48);
+            uint8_t *b = (uint8_t *)desc->buf1;
+            char hex[160];
+            __builtin_sprintf(hex, "D0: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\r\n",
+                               b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
+            hal_uart_puts(hex);
+            __builtin_sprintf(hex, "D1: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\r\n",
+                               b[16], b[17], b[18], b[19], b[20], b[21], b[22], b[23], b[24], b[25], b[26], b[27], b[28], b[29], b[30], b[31]);
+            hal_uart_puts(hex);
+            __builtin_sprintf(hex, "D2: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\r\n",
+                               b[32], b[33], b[34], b[35], b[36], b[37], b[38], b[39], b[40], b[41], b[42], b[43], b[44], b[45], b[46], b[47]);
+            hal_uart_puts(hex);
+        }
+
         /* Error: re-own descriptor */
         desc->status = ETH_RDES0_OWN;
         rx_idx = (rx_idx + 1) % HAL_ETH_RX_DESC_COUNT;
@@ -380,6 +451,11 @@ int hal_eth_rx(uint8_t *buf, size_t max_len, size_t *out_len)
     }
 
     if (!((status & ETH_RDES0_FS) && (status & ETH_RDES0_LS))) {
+        if (saramos_eth_verbose) {
+            char err_dbg[64];
+            __builtin_sprintf(err_dbg, "[ETH] RX fragment error! status=%08lx\r\n", status);
+            hal_uart_puts(err_dbg);
+        }
         /* Fragmented/chained packet not supported in this minimal driver */
         desc->status = ETH_RDES0_OWN;
         rx_idx = (rx_idx + 1) % HAL_ETH_RX_DESC_COUNT;
@@ -404,5 +480,7 @@ int hal_eth_rx(uint8_t *buf, size_t max_len, size_t *out_len)
     /* Resume DMA receive in case it suspended */
     ETH->DMARPDR = 0;
 
+    if (saramos_eth_verbose)
+        hal_uart_puts("[ETH] RX packet\r\n");
     return 1;
 }
