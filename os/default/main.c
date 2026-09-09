@@ -78,6 +78,7 @@ static void cli_help(void)
         "  hello      - Print hello message\r\n"
         "  heartbeat  - Print heartbeat once; 'heartbeat on'/'off' toggles\r\n"
         "               the once-a-second RTOS demo heartbeat log (off by default)\r\n"
+        "  eth on/off - Toggle the per-packet [ETH] RX/TX/ARP/DHCP log (off by default)\r\n"
         "  program    - Create/list/run calculator programs\r\n"
         "  clear      - Clear screen\r\n"
         "  net init   - Initialize Ethernet and start DHCP\r\n"
@@ -228,6 +229,27 @@ static void cli_heartbeat(const char *arg)
         hal_uart_puts("heartbeat: verbose RTOS heartbeat prints OFF\r\n");
     } else {
         hal_uart_puts("Heartbeat from saramOS\r\n");
+    }
+}
+
+/* saramos_eth_verbose is defined in hal_eth.c and also gates the
+ * packet-sniffer prints in ethernetif.c. Off by default -- at normal
+ * traffic rates these fire often enough to make the CLI unusable. */
+extern volatile int saramos_eth_verbose;
+
+static void cli_eth(const char *arg)
+{
+    if (arg && strcmp(arg, "on") == 0) {
+        saramos_eth_verbose = 1;
+        hal_uart_puts("eth: verbose [ETH] RX/TX/ARP/DHCP prints ON\r\n");
+    } else if (arg && strcmp(arg, "off") == 0) {
+        saramos_eth_verbose = 0;
+        hal_uart_puts("eth: verbose [ETH] RX/TX/ARP/DHCP prints OFF\r\n");
+    } else {
+        char buf[48];
+        snprintf(buf, sizeof(buf), "eth: verbose prints are %s (use 'eth on'/'eth off')\r\n",
+                 saramos_eth_verbose ? "ON" : "OFF");
+        hal_uart_puts(buf);
     }
 }
 
@@ -1755,6 +1777,8 @@ static void cli_execute(char *line)
         cli_hello();
     } else if (strcmp(line, "heartbeat") == 0) {
         cli_heartbeat(arg);
+    } else if (strcmp(line, "eth") == 0) {
+        cli_eth(arg);
     } else if (strcmp(line, "program") == 0) {
         cli_program(arg);
     } else if (strcmp(line, "clear") == 0) {

@@ -105,7 +105,7 @@ static int i2c1_read_reg(uint8_t dev_addr7, uint8_t reg, uint8_t *buf, uint32_t 
     while (!(I2C1->ISR & (I2C_ISR_TXIS | I2C_ISR_NACKF)) && --timeout)
         ;
     if (timeout == 0 || (I2C1->ISR & I2C_ISR_NACKF)) {
-        char dbg[80];
+        char dbg[96];
         __builtin_sprintf(dbg, "[TOUCH] addr phase fail: addr7=0x%02X timeout=%lu ISR=0x%08lX CR2=0x%08lX\r\n",
                            dev_addr7, (unsigned long)timeout, (unsigned long)I2C1->ISR, (unsigned long)I2C1->CR2);
         hal_uart_puts(dbg);

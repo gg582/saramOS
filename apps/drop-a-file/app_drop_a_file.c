@@ -56,6 +56,23 @@
 #include <stdio.h>
 
 extern void hal_uart_puts(const char *s);
+extern volatile uint32_t saramos_tick_ms;
+extern void hal_gpio_init_input(uint32_t port_base, uint8_t pin, uint8_t pupd);
+extern int hal_gpio_read(uint32_t port_base, uint8_t pin);
+/* GPIO_PUPD_DOWN comes from hal/board.h (stm32f769i-disco.h). */
+
+/* Blue user button, PA0 -- the only physical input this board actually
+ * has (see apps/draw-picora's identical pin/pull-down reasoning). Used
+ * by nav_task_entry() below to step through the gallery. */
+#define NAV_BUTTON_PORT GPIOA_BASE
+#define NAV_BUTTON_PIN  0U
+
+static void delay_ms(uint32_t ms)
+{
+    uint32_t start = saramos_tick_ms;
+    while ((saramos_tick_ms - start) < ms)
+        ;
+}
 
 /* ---------------------------------------------------------------------
  * Single live framebuffer, direct writes -- same pattern as
@@ -206,17 +223,38 @@ static int decode_and_draw_bmp(const char *path, uint16_t bg)
 
     /* Scale to fit inside 800x480 preserving aspect ratio, then center
      * (letterbox) over the chosen background color. Fixed-point (x256)
-     * to avoid needing float. */
+     * to avoid needing float.
+     *
+     * Also decide whether to rotate 90 degrees: a portrait source (tall
+     * narrow photo) fit into a landscape 800x480 panel unrotated is
+     * bound by the 480-tall limit, leaving it small and letterboxed on
+     * the sides; rotated, its width (which was the narrow dimension)
+     * becomes the panel's 480-tall axis and its height becomes the
+     * panel's 800-wide axis, often fitting a substantially larger
+     * scale. Compare both and use whichever actually comes out bigger,
+     * rather than assuming portrait always wants rotating (a very wide
+     * panorama-style image, for instance, would not). */
+    int rotate;
     {
         uint32_t sx256 = (DISPLAY_WIDTH * 256U) / (uint32_t)width;
         uint32_t sy256 = (DISPLAY_HEIGHT * 256U) / height;
-        uint32_t s256 = (sx256 < sy256) ? sx256 : sy256;
+        uint32_t normal256 = (sx256 < sy256) ? sx256 : sy256;
+
+        uint32_t rx256 = (DISPLAY_WIDTH * 256U) / height;
+        uint32_t ry256 = (DISPLAY_HEIGHT * 256U) / (uint32_t)width;
+        uint32_t rotated256 = (rx256 < ry256) ? rx256 : ry256;
+
+        rotate = (rotated256 > normal256);
+        uint32_t s256 = rotate ? rotated256 : normal256;
         if (s256 == 0)
             s256 = 1;
         scale_num = s256;
         scale_den = 256U;
-        dst_w = ((uint32_t)width * scale_num) / scale_den;
-        dst_h = (height * scale_num) / scale_den;
+
+        uint32_t eff_w = rotate ? height : (uint32_t)width;  /* on-panel width axis */
+        uint32_t eff_h = rotate ? (uint32_t)width : height;  /* on-panel height axis */
+        dst_w = (eff_w * scale_num) / scale_den;
+        dst_h = (eff_h * scale_num) / scale_den;
         if (dst_w > DISPLAY_WIDTH) dst_w = DISPLAY_WIDTH;
         if (dst_h > DISPLAY_HEIGHT) dst_h = DISPLAY_HEIGHT;
         if (dst_w == 0) dst_w = 1;
@@ -243,25 +281,63 @@ static int decode_and_draw_bmp(const char *path, uint16_t bg)
         fb[i] = bg;
 
     uint32_t rows_failed = 0;
-    for (uint32_t dy = 0; dy < dst_h; dy++) {
-        uint32_t src_y = (dy * scale_den) / scale_num;
-        uint32_t file_row = top_down ? src_y : (height - 1U - src_y);
-        uint32_t off = data_off + file_row * row_stride;
+    if (!rotate) {
+        for (uint32_t dy = 0; dy < dst_h; dy++) {
+            uint32_t src_y = (dy * scale_den) / scale_num;
+            uint32_t file_row = top_down ? src_y : (height - 1U - src_y);
+            uint32_t off = data_off + file_row * row_stride;
 
-        if (f_lseek(&fil, off) != FR_OK) {
-            rows_failed++;
-            continue;
-        }
-        if (f_read(&fil, g_row_buf, row_stride, &br) != FR_OK || br < row_stride) {
-            rows_failed++;
-            continue;
-        }
+            if (f_lseek(&fil, off) != FR_OK) {
+                rows_failed++;
+                continue;
+            }
+            if (f_read(&fil, g_row_buf, row_stride, &br) != FR_OK || br < row_stride) {
+                rows_failed++;
+                continue;
+            }
 
-        volatile uint16_t *dst_row = fb + (y0 + dy) * DISPLAY_WIDTH + x0;
+            volatile uint16_t *dst_row = fb + (y0 + dy) * DISPLAY_WIDTH + x0;
+            for (uint32_t dx = 0; dx < dst_w; dx++) {
+                uint32_t src_x = (dx * scale_den) / scale_num;
+                const uint8_t *px = &g_row_buf[src_x * 3U]; /* B, G, R */
+                dst_row[dx] = rgb565(px[2], px[1], px[0]);
+            }
+        }
+    } else {
+        /* 90-degree clockwise rotation: dst(dst_col=x', dst_row=y')
+         * comes from src(row = height-1-x', col = y') (standard CW
+         * rotation formula, dimensions swapped: dst width was scaled
+         * from source height, dst height from source width -- see the
+         * scale/rotate decision above).
+         *
+         * For a FIXED destination column, the source row is constant
+         * (depends only on that column, not the destination row), so
+         * -- exactly like the non-rotated loop above reads one source
+         * row per destination row -- this reads one source row per
+         * destination COLUMN, then scatters its pixels down that
+         * column across the destination rows. Same total number of
+         * row reads either way (bounded by dst_w here instead of
+         * dst_h), just transposed. */
         for (uint32_t dx = 0; dx < dst_w; dx++) {
-            uint32_t src_x = (dx * scale_den) / scale_num;
-            const uint8_t *px = &g_row_buf[src_x * 3U]; /* B, G, R */
-            dst_row[dx] = rgb565(px[2], px[1], px[0]);
+            uint32_t xprime = (dx * scale_den) / scale_num; /* 0..height-1 */
+            uint32_t src_row_logical = height - 1U - xprime; /* 0 = visual top of source image */
+            uint32_t file_row = top_down ? src_row_logical : (height - 1U - src_row_logical);
+            uint32_t off = data_off + file_row * row_stride;
+
+            if (f_lseek(&fil, off) != FR_OK) {
+                rows_failed++;
+                continue;
+            }
+            if (f_read(&fil, g_row_buf, row_stride, &br) != FR_OK || br < row_stride) {
+                rows_failed++;
+                continue;
+            }
+
+            for (uint32_t dy = 0; dy < dst_h; dy++) {
+                uint32_t yprime = (dy * scale_den) / scale_num; /* 0..width-1 = source column */
+                const uint8_t *px = &g_row_buf[yprime * 3U]; /* B, G, R */
+                fb[(y0 + dy) * DISPLAY_WIDTH + (x0 + dx)] = rgb565(px[2], px[1], px[0]);
+            }
         }
     }
 
@@ -270,9 +346,9 @@ static int decode_and_draw_bmp(const char *path, uint16_t bg)
     __asm volatile("dsb" ::: "memory");
 
     {
-        char dbg[64];
-        snprintf(dbg, sizeof(dbg), "drop-a-file: drawn (rows_failed=%lu/%lu)\r\n",
-                 (unsigned long)rows_failed, (unsigned long)dst_h);
+        char dbg[80];
+        snprintf(dbg, sizeof(dbg), "drop-a-file: drawn (rotate=%d, rows_failed=%lu/%lu)\r\n",
+                 rotate, (unsigned long)rows_failed, (unsigned long)(rotate ? dst_w : dst_h));
         hal_uart_puts(dbg);
     }
     return 0;
@@ -395,10 +471,98 @@ void fs_close_custom(struct fs_file *file)
 }
 
 /* ---------------------------------------------------------------------
- * Upload handling: raw POST body (no multipart) straight to SD.
+ * Gallery: every successful upload gets its own numbered slot
+ * (upload0.bmp, upload1.bmp, ...) instead of overwriting a single
+ * file, so the SD card accumulates as many images as it has room for.
+ * A single small metadata file tracks how many exist and which one is
+ * currently shown; the blue user button (PA0 -- the only physical
+ * input this board actually has, see nav_task_entry() below) steps
+ * through them.
  * ------------------------------------------------------------------- */
-#define UPLOAD_PATH        "upload.bmp"
+#define UPLOAD_STAGING_PATH "incoming.bmp" /* where an in-progress POST body is written */
+#define GALLERY_META_PATH   "gallery.meta" /* 8 bytes: u32 count, u32 current (both little-endian) */
 #define MAX_UPLOAD_BYTES    (4U * 1024U * 1024U) /* generous for a photo; bounded so a bad/slow client can't fill the card */
+
+static void gallery_img_path(char *buf, size_t buf_size, uint32_t idx)
+{
+    snprintf(buf, buf_size, "upload%lu.bmp", (unsigned long)idx);
+}
+
+static void gallery_bg_path(char *buf, size_t buf_size, uint32_t idx)
+{
+    snprintf(buf, buf_size, "upload%lu.bg", (unsigned long)idx);
+}
+
+/* count = how many images exist (next new upload becomes index
+ * `count`); current = index of the one currently shown. Both 0 when
+ * gallery.meta doesn't exist yet (nothing uploaded so far). */
+static void gallery_load_meta(uint32_t *count, uint32_t *current)
+{
+    FIL fil;
+    UINT br;
+    uint8_t buf[8] = { 0 };
+
+    *count = 0;
+    *current = 0;
+    if (f_open(&fil, GALLERY_META_PATH, FA_READ) != FR_OK)
+        return;
+    f_read(&fil, buf, sizeof(buf), &br);
+    f_close(&fil);
+    if (br < sizeof(buf))
+        return;
+    *count = (uint32_t)buf[0] | ((uint32_t)buf[1] << 8) | ((uint32_t)buf[2] << 16) | ((uint32_t)buf[3] << 24);
+    *current = (uint32_t)buf[4] | ((uint32_t)buf[5] << 8) | ((uint32_t)buf[6] << 16) | ((uint32_t)buf[7] << 24);
+}
+
+static void gallery_save_meta(uint32_t count, uint32_t current)
+{
+    FIL fil;
+    UINT bw;
+    uint8_t buf[8];
+
+    buf[0] = (uint8_t)(count); buf[1] = (uint8_t)(count >> 8);
+    buf[2] = (uint8_t)(count >> 16); buf[3] = (uint8_t)(count >> 24);
+    buf[4] = (uint8_t)(current); buf[5] = (uint8_t)(current >> 8);
+    buf[6] = (uint8_t)(current >> 16); buf[7] = (uint8_t)(current >> 24);
+
+    if (f_open(&fil, GALLERY_META_PATH, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK)
+        return;
+    f_write(&fil, buf, sizeof(buf), &bw);
+    f_close(&fil);
+}
+
+/* Persists the background color alongside an image so a power-cycle
+ * (or stepping back to it later with the button) restores it exactly
+ * as it looked. Best-effort: a failure here just means that slot's
+ * background defaults to black, not a reason to fail the upload. */
+static void save_bg_color(uint32_t idx, uint16_t bg)
+{
+    FIL fil;
+    UINT bw;
+    char path[24];
+    uint8_t buf[2] = { (uint8_t)(bg & 0xFFU), (uint8_t)(bg >> 8) };
+
+    gallery_bg_path(path, sizeof(path), idx);
+    if (f_open(&fil, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK)
+        return;
+    f_write(&fil, buf, sizeof(buf), &bw);
+    f_close(&fil);
+}
+
+static uint16_t load_bg_color(uint32_t idx)
+{
+    FIL fil;
+    UINT br;
+    char path[24];
+    uint8_t buf[2] = { 0, 0 };
+
+    gallery_bg_path(path, sizeof(path), idx);
+    if (f_open(&fil, path, FA_READ) != FR_OK)
+        return 0;
+    f_read(&fil, buf, sizeof(buf), &br);
+    f_close(&fil);
+    return (uint16_t)buf[0] | ((uint16_t)buf[1] << 8);
+}
 
 static FIL g_upload_fil;
 static int g_upload_open = 0;
@@ -442,9 +606,9 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
         }
     }
 
-    fr = f_open(&g_upload_fil, UPLOAD_PATH, FA_WRITE | FA_CREATE_ALWAYS);
+    fr = f_open(&g_upload_fil, UPLOAD_STAGING_PATH, FA_WRITE | FA_CREATE_ALWAYS);
     if (fr != FR_OK) {
-        hal_uart_puts("drop-a-file: could not open upload.bmp on SD (sd init done?)\r\n");
+        hal_uart_puts("drop-a-file: could not open incoming.bmp on SD (sd init done?)\r\n");
         return ERR_ARG;
     }
 
@@ -481,10 +645,12 @@ err_t httpd_post_receive_data(void *connection, struct pbuf *p)
     return ERR_OK;
 }
 
-/* Set by httpd_post_finished(), consumed by draw_task_entry() below --
- * see that task's comment for why the actual decode+draw happens there
- * instead of inline, synchronously, in httpd_post_finished() itself. */
+/* Set by httpd_post_finished() (a new upload) or nav_task_entry() (the
+ * button stepping to a different existing image), consumed by
+ * draw_task_entry() below -- see that task's comment for why the
+ * actual decode+draw happens there instead of inline. */
 static volatile int g_draw_pending = 0;
+static char g_draw_path[24];
 static uint16_t g_draw_bg;
 
 void httpd_post_finished(void *connection, char *response_uri, u16_t response_uri_len)
@@ -497,9 +663,18 @@ void httpd_post_finished(void *connection, char *response_uri, u16_t response_ur
     }
 
     if (g_upload_ok && g_upload_bytes > 0) {
-        char msg[64];
-        snprintf(msg, sizeof(msg), "drop-a-file: received %lu bytes\r\n",
-                 (unsigned long)g_upload_bytes);
+        char msg[80];
+        uint32_t count, current, new_idx;
+
+        gallery_load_meta(&count, &current);
+        new_idx = count;
+        gallery_img_path(g_draw_path, sizeof(g_draw_path), new_idx);
+        f_rename(UPLOAD_STAGING_PATH, g_draw_path);
+        save_bg_color(new_idx, g_bg_color);
+        gallery_save_meta(new_idx + 1U, new_idx);
+
+        snprintf(msg, sizeof(msg), "drop-a-file: received %lu bytes -> slot %lu (gallery now %lu images)\r\n",
+                 (unsigned long)g_upload_bytes, (unsigned long)new_idx, (unsigned long)(new_idx + 1U));
         hal_uart_puts(msg);
         /* Hand off to draw_task_entry() rather than calling
          * decode_and_draw_bmp() here -- this function runs on net_task
@@ -546,7 +721,7 @@ static void draw_task_entry(void *arg)
     (void)arg;
     for (;;) {
         if (g_draw_pending) {
-            if (decode_and_draw_bmp(UPLOAD_PATH, g_draw_bg) == 0) {
+            if (decode_and_draw_bmp(g_draw_path, g_draw_bg) == 0) {
                 snapshot_current_frame();
                 g_have_snapshot = 1;
             }
@@ -718,6 +893,58 @@ static void touch_task_entry(void *arg)
 }
 
 /* ---------------------------------------------------------------------
+ * Gallery navigation: this board's only physical input is the single
+ * blue user button (PA0), so "up/down/left/right, mapped to previous/
+ * next" collapses to what one button can actually distinguish -- a
+ * short press vs. a long press (held past NAV_LONG_PRESS_MS). Short
+ * press: next image. Long press: previous image. Both wrap around.
+ * ------------------------------------------------------------------- */
+#define NAV_LONG_PRESS_MS 600U
+
+/* Loads the gallery image at `idx` (its own saved background color
+ * included), same hand-off-to-draw_task_entry() pattern as a fresh
+ * upload -- see httpd_post_finished()'s comment for why the drawing
+ * itself happens on a separate task rather than inline here. */
+static void gallery_show(uint32_t idx)
+{
+    gallery_img_path(g_draw_path, sizeof(g_draw_path), idx);
+    g_draw_bg = load_bg_color(idx);
+    g_draw_pending = 1;
+}
+
+static void nav_task_entry(void *arg)
+{
+    int was_pressed = 0;
+    uint32_t press_start_ms = 0;
+
+    (void)arg;
+
+    for (;;) {
+        int pressed = hal_gpio_read(NAV_BUTTON_PORT, NAV_BUTTON_PIN) ? 1 : 0;
+
+        if (pressed && !was_pressed) {
+            press_start_ms = saramos_tick_ms;
+        } else if (!pressed && was_pressed) {
+            uint32_t held_ms = saramos_tick_ms - press_start_ms;
+            uint32_t count, current;
+
+            gallery_load_meta(&count, &current);
+            if (count > 0) {
+                if (held_ms >= NAV_LONG_PRESS_MS)
+                    current = (current + count - 1U) % count; /* long press: previous */
+                else
+                    current = (current + 1U) % count;         /* short press: next */
+                gallery_save_meta(count, current);
+                gallery_show(current);
+            }
+        }
+
+        was_pressed = pressed;
+        delay_ms(30); /* ~33Hz poll, cheap debounce -- same cadence as apps/draw-picora's button task */
+    }
+}
+
+/* ---------------------------------------------------------------------
  * CLI: "dropafile" re-prints the board's IP/status on demand (e.g.
  * after DHCP finishes, which happens asynchronously after boot). Actual
  * bring-up (net/SD/HTTP + display) happens automatically at boot in
@@ -756,6 +983,30 @@ void app_register_commands(void)
     cli_http_start();
     ensure_display_started();
 
+    /* Restore whichever gallery image was current (and its background
+     * color) from SD, so a power cycle with no network/browser involved
+     * at all still shows the last picture -- not just "whenever someone
+     * next drops a file". gallery_load_meta() reports count=0 if
+     * gallery.meta doesn't exist yet (genuinely first boot), which this
+     * skips cleanly. Synchronous here (unlike the upload/nav-button
+     * hand-off to draw_task_entry) because there is no HTTP response or
+     * button-release to keep prompt -- boot just waits the moment it
+     * takes. */
+    {
+        uint32_t count, current;
+        char path[24];
+
+        gallery_load_meta(&count, &current);
+        if (count > 0) {
+            gallery_img_path(path, sizeof(path), current);
+            if (decode_and_draw_bmp(path, load_bg_color(current)) == 0) {
+                snapshot_current_frame();
+                g_have_snapshot = 1;
+                hal_uart_puts("drop-a-file: restored last image from SD\r\n");
+            }
+        }
+    }
+
     /* See draw_task_entry()'s comment: decode+draw runs on its own TCB
      * task so it never blocks net_task (and therefore the HTTP
      * response for the upload that triggered it). Priority matches
@@ -769,6 +1020,19 @@ void app_register_commands(void)
                           NULL, draw_task_stack, sizeof(draw_task_stack),
                           100U, NULL, NULL);
         saramos_task_add(&draw_task_tcb);
+    }
+
+    /* Gallery navigation (see nav_task_entry()'s comment) -- its own
+     * TCB task, same priority/reasoning as the others above. */
+    hal_gpio_init_input(NAV_BUTTON_PORT, NAV_BUTTON_PIN, GPIO_PUPD_DOWN);
+    {
+        static uint8_t nav_task_stack[2048];
+        static saramos_tcb_t nav_task_tcb;
+
+        saramos_task_init(&nav_task_tcb, 5, nav_task_entry,
+                          NULL, nav_task_stack, sizeof(nav_task_stack),
+                          100U, NULL, NULL);
+        saramos_task_add(&nav_task_tcb);
     }
 
     /* Touch test (see touch_task_entry()'s comment). This board's touch
