@@ -155,9 +155,11 @@ static void init_descriptor_rings(void)
 
 static int phy_init(void)
 {
+    extern volatile uint32_t saramos_tick_ms;
     uint16_t bcr;
     uint16_t bsr;
     uint32_t timeout;
+    uint32_t deadline;
 
     /* Reset PHY */
     smii_write(LAN8742A_PHY_ADDR, PHY_BCR, PHY_BCR_RESET);
@@ -174,18 +176,45 @@ static int phy_init(void)
     smii_write(LAN8742A_PHY_ADDR, PHY_BCR, bcr);
     smii_write(LAN8742A_PHY_ADDR, PHY_BCR, bcr | PHY_BCR_ANEG_RST);
 
-    /* Wait for link up and auto-negotiation complete */
-    timeout = 100000;
-    while (timeout--) {
+    /* Wait for link up and auto-negotiation complete. IEEE 802.3
+     * auto-negotiation legitimately takes on the order of hundreds of
+     * milliseconds and varies boot to boot (link partner state,
+     * parallel detection, ...). A raw busy-loop iteration count is not
+     * a reliable proxy for that elapsed time -- its real wall-clock
+     * duration isn't fixed, so on some boots this loop's 100000
+     * iterations ran out well before the PHY actually finished
+     * negotiating, and the code below fell through anyway: it read
+     * HCD speed/duplex from SCSR while negotiation was still in
+     * progress and enabled the MAC against those stale/default
+     * values. A MAC configured with the wrong duplex relative to what
+     * the link partner actually negotiated doesn't corrupt frames --
+     * it silently receives nothing, which is exactly the symptom
+     * observed (link reports up, DHCP never gets a single reply, and
+     * zero RX events happen even with "eth on" verbose logging
+     * capturing 30+ seconds of a live LAN's broadcast traffic).
+     * Use the RTOS tick (already running here -- hal_eth_init() runs
+     * well after hal_systick_init() in main()) for a real deadline
+     * instead, and only proceed once ANEG_CMPLT is confirmed. */
+    deadline = saramos_tick_ms + 3000U;
+    do {
         bsr = smii_read(LAN8742A_PHY_ADDR, PHY_BSR);
         if ((bsr & (PHY_BSR_LINK_UP | PHY_BSR_ANEG_CMPLT)) ==
             (PHY_BSR_LINK_UP | PHY_BSR_ANEG_CMPLT)) {
             break;
         }
-    }
+    } while ((int32_t)(saramos_tick_ms - deadline) < 0);
 
     bsr = smii_read(LAN8742A_PHY_ADDR, PHY_BSR);
     eth_link_up = (bsr & PHY_BSR_LINK_UP) ? 1 : 0;
+
+    if (!(bsr & PHY_BSR_ANEG_CMPLT)) {
+        /* Negotiation genuinely never finished within the deadline
+         * (no link partner, cable unplugged, ...) -- fail instead of
+         * letting the caller enable the MAC against whatever
+         * speed/duplex SCSR happens to report mid-negotiation. */
+        return -3;
+    }
+
     return 0;
 }
 
@@ -444,9 +473,21 @@ int hal_eth_rx(uint8_t *buf, size_t max_len, size_t *out_len)
             hal_uart_puts(hex);
         }
 
-        /* Error: re-own descriptor */
+        /* Error: re-own descriptor. Also poke DMARPDR (Receive Poll
+         * Demand) here, same as the success path below -- without it,
+         * if the DMA's receive process happened to go Suspended around
+         * this error, it never resumes polling on its own, and every
+         * later hal_eth_rx() call just re-reads whatever stale content
+         * is already sitting in the ring instead of ever seeing a new
+         * frame. Confirmed in practice: the exact same ARP frame,
+         * byte-for-byte, printed over and over with "eth on" -- not
+         * genuine repeated traffic, this driver reading the same
+         * un-refreshed descriptors in a loop while the real DHCP OFFER
+         * (or anything else) never arrives because DMA stopped
+         * fetching new frames entirely. */
         desc->status = ETH_RDES0_OWN;
         rx_idx = (rx_idx + 1) % HAL_ETH_RX_DESC_COUNT;
+        ETH->DMARPDR = 0;
         return -1;
     }
 
@@ -459,6 +500,7 @@ int hal_eth_rx(uint8_t *buf, size_t max_len, size_t *out_len)
         /* Fragmented/chained packet not supported in this minimal driver */
         desc->status = ETH_RDES0_OWN;
         rx_idx = (rx_idx + 1) % HAL_ETH_RX_DESC_COUNT;
+        ETH->DMARPDR = 0; /* see the ES-error branch's comment above */
         return -2;
     }
 

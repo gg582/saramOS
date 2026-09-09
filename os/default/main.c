@@ -1908,12 +1908,27 @@ static void saramos_sched_run_task_entry(void *arg)
  * as sched_task's own loop below) until networking actually exists. */
 static void net_task_entry(void *arg)
 {
+    extern volatile int saramos_eth_verbose;
+    uint32_t last_print_ms = 0;
+
     (void)arg;
     for (;;) {
         if (net_initialized) {
             ethernetif_input(&gnetif);
             sys_check_timeouts();
             hal_eth_poll();
+
+            /* Passive DHCP-state heartbeat, once a second while not yet
+             * bound: makes the negotiation state visible on the wire
+             * without depending on typing "net status" (which itself
+             * needs a CLI round-trip that a busy boot can delay). Gated
+             * on the same saramos_eth_verbose flag as this file's other
+             * "eth on"/"eth off" diagnostics -- see hal_eth.c. */
+            if (saramos_eth_verbose && !dhcp_supplied_address(&gnetif) &&
+                (saramos_tick_ms - last_print_ms) >= 1000U) {
+                last_print_ms = saramos_tick_ms;
+                cli_net_status();
+            }
         }
     }
 }
