@@ -95,8 +95,14 @@ typedef struct {
 #define ETH_RDES0_FL_Pos    16U
 #define ETH_RDES0_FL_Msk    0x3FFFU
 #define ETH_RDES0_ES        (1U << 15)
+#define ETH_RDES0_DE        (1U << 14) /* descriptor error (frame too large for the buffer) */
 #define ETH_RDES0_FS        (1U << 9)
 #define ETH_RDES0_LS        (1U << 8)
+#define ETH_RDES0_LC        (1U << 6)  /* late collision */
+#define ETH_RDES0_RWT       (1U << 4)  /* receive watchdog timeout */
+#define ETH_RDES0_RE        (1U << 3)  /* receive error (PHY-reported RXER during reception) */
+#define ETH_RDES0_CE        (1U << 1)  /* CRC error */
+#define ETH_RDES0_OE        (1U << 11) /* overflow error */
 
 /* RX descriptor control */
 #define ETH_RDES1_RCH       (1U << 14)

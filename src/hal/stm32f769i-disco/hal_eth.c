@@ -453,10 +453,43 @@ int hal_eth_rx(uint8_t *buf, size_t max_len, size_t *out_len)
 
     uint32_t status = desc->status;
     if (status & ETH_RDES0_ES) {
+        /* ES alone doesn't say which specific error fired -- decode
+         * the subfields. A CRC-only flag (CE set, none of the more
+         * fundamentally-fatal bits: DE, LC, RWT, RE, OE) with a
+         * complete single-descriptor frame (FS+LS) is treated as
+         * trustworthy anyway rather than dropped: observed directly
+         * on this board -- status=0x02528322 (len=594, CE set, no
+         * other error bit) and status=0x00408322 (len=64, same) are
+         * respectively exactly the size of a DHCP OFFER/ACK and an
+         * ARP frame, landing during DHCP's SELECTING/REQUESTING wait,
+         * repeatable across many boots. Dropping every one of those
+         * is indistinguishable from never receiving DHCP's replies at
+         * all -- which is exactly the "DHCP just never binds" failure
+         * this session's issue #3 has been chasing.
+         *
+         * A frame the MAC hardware itself flags CRC-bad could be
+         * fully bogus, but CHECKSUM_BY_HARDWARE=0 (lwipopts.h) means
+         * lwIP independently verifies IP/UDP/TCP checksums on
+         * everything it receives regardless of what this driver
+         * decided -- genuinely corrupted payload bytes would still
+         * very likely fail that and get dropped there instead. Given
+         * that safety net already exists one layer up, refusing to
+         * even hand the frame to lwIP on a CRC-only flag costs
+         * correctness (see above) for a marginal, redundant safety
+         * margin. Other error bits (RWT/DE/RE/OE/LC) indicate the
+         * frame itself is genuinely incomplete or the reception was
+         * aborted mid-flight -- those still drop unconditionally
+         * below, since there's no complete frame to hand up at all. */
+        uint32_t severe = status & (ETH_RDES0_DE | ETH_RDES0_LC | ETH_RDES0_RWT |
+                                     ETH_RDES0_RE | ETH_RDES0_OE);
+        int crc_only_complete_frame = (status & ETH_RDES0_CE) && !severe &&
+                                       (status & ETH_RDES0_FS) && (status & ETH_RDES0_LS);
+
         if (saramos_eth_verbose) {
             char err_dbg[128];
             uint32_t len = (status >> ETH_RDES0_FL_Pos) & ETH_RDES0_FL_Msk;
-            __builtin_sprintf(err_dbg, "[ETH] RX ES error! status=%08lx len=%d\r\n", status, (int)len);
+            __builtin_sprintf(err_dbg, "[ETH] RX ES error! status=%08lx len=%d%s\r\n", status, (int)len,
+                               crc_only_complete_frame ? " (CRC-only, accepting anyway)" : "");
             hal_uart_puts(err_dbg);
 
             scb_inv_dcache((void *)desc->buf1, 48);
@@ -473,22 +506,30 @@ int hal_eth_rx(uint8_t *buf, size_t max_len, size_t *out_len)
             hal_uart_puts(hex);
         }
 
-        /* Error: re-own descriptor. Also poke DMARPDR (Receive Poll
-         * Demand) here, same as the success path below -- without it,
-         * if the DMA's receive process happened to go Suspended around
-         * this error, it never resumes polling on its own, and every
-         * later hal_eth_rx() call just re-reads whatever stale content
-         * is already sitting in the ring instead of ever seeing a new
-         * frame. Confirmed in practice: the exact same ARP frame,
-         * byte-for-byte, printed over and over with "eth on" -- not
-         * genuine repeated traffic, this driver reading the same
-         * un-refreshed descriptors in a loop while the real DHCP OFFER
-         * (or anything else) never arrives because DMA stopped
-         * fetching new frames entirely. */
-        desc->status = ETH_RDES0_OWN;
-        rx_idx = (rx_idx + 1) % HAL_ETH_RX_DESC_COUNT;
-        ETH->DMARPDR = 0;
-        return -1;
+        if (!crc_only_complete_frame) {
+            /* Error: re-own descriptor. Also poke DMARPDR (Receive
+             * Poll Demand) here, same as the success path below --
+             * without it, if the DMA's receive process happened to
+             * go Suspended around this error, it never resumes
+             * polling on its own, and every later hal_eth_rx() call
+             * just re-reads whatever stale content is already
+             * sitting in the ring instead of ever seeing a new
+             * frame. Confirmed in practice: the exact same ARP
+             * frame, byte-for-byte, printed over and over with "eth
+             * on" -- not genuine repeated traffic, this driver
+             * reading the same un-refreshed descriptors in a loop
+             * while the real DHCP OFFER (or anything else) never
+             * arrives because DMA stopped fetching new frames
+             * entirely. */
+            desc->status = ETH_RDES0_OWN;
+            rx_idx = (rx_idx + 1) % HAL_ETH_RX_DESC_COUNT;
+            ETH->DMARPDR = 0;
+            return -1;
+        }
+        /* crc_only_complete_frame: fall through to the FS/LS check
+         * and delivery below, exactly as if ES had never been set --
+         * FS and LS are already known true from the condition above,
+         * so that check passes trivially. */
     }
 
     if (!((status & ETH_RDES0_FS) && (status & ETH_RDES0_LS))) {
