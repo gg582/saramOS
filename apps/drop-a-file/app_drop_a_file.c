@@ -161,7 +161,15 @@ static uint16_t rd_le16(const uint8_t *p) { return (uint16_t)((uint16_t)p[0] | (
 /* Draws directly into the back buffer (the slot NOT currently on
  * screen), then flips -- the whole redraw is atomic from the viewer's
  * perspective, no partial-frame tearing. Returns 0 on success. */
-static int decode_and_draw_bmp(const char *path, uint16_t bg)
+/* out_rows_failed (may be NULL): set to the number of source rows that
+ * could not be read even after hal_sdmmc.c's own per-block retries --
+ * i.e. genuine, unrecoverable SD read errors, not just slow ones. A
+ * nonzero count means the drawn image has real missing/blank stripes
+ * in it, which callers treat as "this file is corrupt" (see
+ * draw_gallery_slot() below). Left untouched (caller should treat as
+ * "unknown/worst case") when this function returns nonzero, since a
+ * bad header/dimensions is rejected before rows are ever counted. */
+static int decode_and_draw_bmp(const char *path, uint16_t bg, uint32_t *out_rows_failed)
 {
     FIL fil;
     FRESULT fr;
@@ -351,6 +359,8 @@ static int decode_and_draw_bmp(const char *path, uint16_t bg)
                  rotate, (unsigned long)rows_failed, (unsigned long)(rotate ? dst_w : dst_h));
         hal_uart_puts(dbg);
     }
+    if (out_rows_failed)
+        *out_rows_failed = rows_failed;
     return 0;
 }
 
@@ -564,6 +574,57 @@ static uint16_t load_bg_color(uint32_t idx)
     return (uint16_t)buf[0] | ((uint16_t)buf[1] << 8);
 }
 
+/* Removes gallery slot `idx` (its .bmp and .bg files) and shifts every
+ * slot above it down by one so the numbering upload0.bmp..upload{count-1}.bmp
+ * stays contiguous -- gallery_img_path()/gallery_load_meta() assume
+ * that contiguity, so a plain unlink-and-leave-a-hole would strand
+ * every slot above idx. `current` is adjusted to keep pointing at a
+ * sensible image: unaffected if it was below idx, shifted down along
+ * with everything above idx if it was above, and left to fall out
+ * exactly onto whatever shifted into idx's place if it *was* idx (i.e.
+ * deleting the currently-shown image auto-advances to the next one;
+ * if idx was the last slot, it falls back to the new last slot
+ * instead, i.e. the previous image). */
+static void gallery_delete_slot(uint32_t idx)
+{
+    uint32_t count, current, i;
+    char src[24], dst[24];
+
+    gallery_load_meta(&count, &current);
+    if (idx >= count)
+        return;
+
+    for (i = idx; i + 1U < count; i++) {
+        gallery_img_path(src, sizeof(src), i + 1U);
+        gallery_img_path(dst, sizeof(dst), i);
+        f_unlink(dst);
+        f_rename(src, dst);
+
+        gallery_bg_path(src, sizeof(src), i + 1U);
+        gallery_bg_path(dst, sizeof(dst), i);
+        f_unlink(dst);
+        f_rename(src, dst);
+    }
+    /* Whatever's left at the old top slot is either the corrupted
+     * file itself (idx was already last) or a duplicate left behind
+     * by the last rename above -- either way it's no longer part of
+     * the gallery. */
+    gallery_img_path(src, sizeof(src), count - 1U);
+    f_unlink(src);
+    gallery_bg_path(src, sizeof(src), count - 1U);
+    f_unlink(src);
+
+    count -= 1U;
+    if (count == 0U)
+        current = 0U;
+    else if (current >= count)
+        current = count - 1U;
+    else if (current > idx)
+        current -= 1U;
+
+    gallery_save_meta(count, current);
+}
+
 static FIL g_upload_fil;
 static int g_upload_open = 0;
 static uint32_t g_upload_bytes = 0;
@@ -648,10 +709,12 @@ err_t httpd_post_receive_data(void *connection, struct pbuf *p)
 /* Set by httpd_post_finished() (a new upload) or nav_task_entry() (the
  * button stepping to a different existing image), consumed by
  * draw_task_entry() below -- see that task's comment for why the
- * actual decode+draw happens there instead of inline. */
+ * actual decode+draw happens there instead of inline. Just the slot
+ * index; draw_gallery_slot() below looks up that slot's path/bg fresh
+ * each time (needed anyway since a corrupt-slot cleanup can change
+ * which index the caller should actually end up showing). */
 static volatile int g_draw_pending = 0;
-static char g_draw_path[24];
-static uint16_t g_draw_bg;
+static uint32_t g_draw_idx;
 
 void httpd_post_finished(void *connection, char *response_uri, u16_t response_uri_len)
 {
@@ -664,12 +727,13 @@ void httpd_post_finished(void *connection, char *response_uri, u16_t response_ur
 
     if (g_upload_ok && g_upload_bytes > 0) {
         char msg[80];
+        char new_path[24];
         uint32_t count, current, new_idx;
 
         gallery_load_meta(&count, &current);
         new_idx = count;
-        gallery_img_path(g_draw_path, sizeof(g_draw_path), new_idx);
-        f_rename(UPLOAD_STAGING_PATH, g_draw_path);
+        gallery_img_path(new_path, sizeof(new_path), new_idx);
+        f_rename(UPLOAD_STAGING_PATH, new_path);
         save_bg_color(new_idx, g_bg_color);
         gallery_save_meta(new_idx + 1U, new_idx);
 
@@ -695,7 +759,7 @@ void httpd_post_finished(void *connection, char *response_uri, u16_t response_ur
          * the response. Setting a flag here instead lets httpd send
          * the response immediately; the actual (slow) drawing happens
          * afterward, off the TCP path entirely. */
-        g_draw_bg = g_bg_color;
+        g_draw_idx = new_idx;
         g_draw_pending = 1;
     } else {
         hal_uart_puts("drop-a-file: upload failed or empty\r\n");
@@ -716,15 +780,66 @@ void httpd_post_finished(void *connection, char *response_uri, u16_t response_ur
 static void snapshot_current_frame(void); /* defined below, see the touch-test section */
 static volatile int g_have_snapshot = 0;
 
+/* Draws gallery slot `idx`. If decode_and_draw_bmp() comes back with
+ * any rows it genuinely could not read (real SD errors surviving
+ * hal_sdmmc.c's own per-block retries, not just slow ones -- see
+ * decode_and_draw_bmp()'s out_rows_failed comment) or rejects the file
+ * outright (bad header/dimensions), treats that slot as corrupt:
+ * removes it from the gallery via gallery_delete_slot() and tries
+ * whatever slot that leaves as "current" instead, repeating until
+ * something draws cleanly or the gallery is empty. A corrupt upload
+ * is the case this was written for (observed: drawing right after a
+ * fresh upload is measurably slower than a boot-time restore of the
+ * same kind of file -- SD cards commonly answer reads slower right
+ * after a write while their controller is still busy internally, so
+ * the exact same retry-with-backoff logic that papers over an
+ * ordinary slow read can still exhaust its retries and come back
+ * genuinely empty on a row here and there), but this also cleans up a
+ * file that degrades on the card later and gets rediscovered via the
+ * nav button or a power-cycle restore. */
+static void draw_gallery_slot(uint32_t idx)
+{
+    for (;;) {
+        uint32_t count, current, rows_failed;
+        char path[24];
+        int corrupt;
+
+        gallery_load_meta(&count, &current);
+        if (count == 0U)
+            return;
+
+        gallery_img_path(path, sizeof(path), idx);
+        rows_failed = 0;
+        corrupt = (decode_and_draw_bmp(path, load_bg_color(idx), &rows_failed) != 0) ||
+                  (rows_failed > 0U);
+
+        if (!corrupt) {
+            snapshot_current_frame();
+            g_have_snapshot = 1;
+            return;
+        }
+
+        {
+            char msg[128];
+            snprintf(msg, sizeof(msg),
+                     "drop-a-file: %s unreadable/corrupt (%lu bad row(s)) -- removing from gallery\r\n",
+                     path, (unsigned long)rows_failed);
+            hal_uart_puts(msg);
+        }
+        gallery_delete_slot(idx);
+        gallery_load_meta(&count, &current);
+        if (count == 0U)
+            return;
+        idx = current; /* gallery_delete_slot() already picked a sensible one */
+    }
+}
+
 static void draw_task_entry(void *arg)
 {
     (void)arg;
     for (;;) {
         if (g_draw_pending) {
-            if (decode_and_draw_bmp(g_draw_path, g_draw_bg) == 0) {
-                snapshot_current_frame();
-                g_have_snapshot = 1;
-            }
+            draw_gallery_slot(g_draw_idx);
             g_draw_pending = 0;
         }
     }
@@ -901,14 +1016,12 @@ static void touch_task_entry(void *arg)
  * ------------------------------------------------------------------- */
 #define NAV_LONG_PRESS_MS 600U
 
-/* Loads the gallery image at `idx` (its own saved background color
- * included), same hand-off-to-draw_task_entry() pattern as a fresh
- * upload -- see httpd_post_finished()'s comment for why the drawing
- * itself happens on a separate task rather than inline here. */
+/* Same hand-off-to-draw_task_entry() pattern as a fresh upload -- see
+ * httpd_post_finished()'s comment for why the drawing itself happens
+ * on a separate task rather than inline here. */
 static void gallery_show(uint32_t idx)
 {
-    gallery_img_path(g_draw_path, sizeof(g_draw_path), idx);
-    g_draw_bg = load_bg_color(idx);
+    g_draw_idx = idx;
     g_draw_pending = 1;
 }
 
@@ -994,16 +1107,11 @@ void app_register_commands(void)
      * takes. */
     {
         uint32_t count, current;
-        char path[24];
 
         gallery_load_meta(&count, &current);
         if (count > 0) {
-            gallery_img_path(path, sizeof(path), current);
-            if (decode_and_draw_bmp(path, load_bg_color(current)) == 0) {
-                snapshot_current_frame();
-                g_have_snapshot = 1;
-                hal_uart_puts("drop-a-file: restored last image from SD\r\n");
-            }
+            hal_uart_puts("drop-a-file: restoring last image from SD\r\n");
+            draw_gallery_slot(current); /* also cleans up if that slot turns out corrupt */
         }
     }
 
