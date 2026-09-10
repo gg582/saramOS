@@ -158,9 +158,17 @@ static uint8_t g_row_buf[MAX_SRC_WIDTH * 3U];
 static uint32_t rd_le32(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
 static uint16_t rd_le16(const uint8_t *p) { return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8)); }
 
-/* Draws directly into the back buffer (the slot NOT currently on
- * screen), then flips -- the whole redraw is atomic from the viewer's
- * perspective, no partial-frame tearing. Returns 0 on success. */
+/* A third full-panel RGB565 buffer, right after the live framebuffer
+ * and the touch-test's snapshot buffer (see snapshot_addr() below) --
+ * DISPLAY_FB_SIZE (768,000) more bytes, bringing total SDRAM use to
+ * 3 * 768,000 = 2,304,000 bytes (~2.2 MB) out of 16 MB. This is where
+ * decode_and_draw_bmp() actually draws (see below for why); unrelated
+ * to and independent from the touch-test's own snapshot buffer. */
+static inline uint32_t staging_addr(void)
+{
+    return hal_sdram_base() + 2U * DISPLAY_FB_SIZE;
+}
+
 /* out_rows_failed (may be NULL): set to the number of source rows that
  * could not be read even after hal_sdmmc.c's own per-block retries --
  * i.e. genuine, unrecoverable SD read errors, not just slow ones. A
@@ -168,7 +176,21 @@ static uint16_t rd_le16(const uint8_t *p) { return (uint16_t)((uint16_t)p[0] | (
  * in it, which callers treat as "this file is corrupt" (see
  * draw_gallery_slot() below). Left untouched (caller should treat as
  * "unknown/worst case") when this function returns nonzero, since a
- * bad header/dimensions is rejected before rows are ever counted. */
+ * bad header/dimensions is rejected before rows are ever counted.
+ *
+ * Draws into staging_addr(), not the live framebuffer, and only
+ * copies the result onto the live framebuffer at the very end, once a
+ * clean read (rows_failed == 0) is confirmed -- this used to draw
+ * straight into the live framebuffer, clearing it to the background
+ * color before a single row was even read. That meant a slot that
+ * turned out corrupt (or just genuinely unreadable that moment)
+ * blacked the live display out immediately, and it stayed black for
+ * however long draw_gallery_slot()'s retry-before-delete budget took
+ * (up to ~7.5s) before the screen recovered to a different image --
+ * or never recovered, if every remaining slot also failed. Drawing
+ * into a scratch buffer first means a bad read never touches what's
+ * actually on screen: the previous image just stays up, unbroken,
+ * until something draws cleanly. */
 static int decode_and_draw_bmp(const char *path, uint16_t bg, uint32_t *out_rows_failed)
 {
     FIL fil;
@@ -282,9 +304,9 @@ static int decode_and_draw_bmp(const char *path, uint16_t bg, uint32_t *out_rows
     }
 
     ensure_display_started();
-    fb = (volatile uint16_t *)hal_display_fb_addr();
+    fb = (volatile uint16_t *)staging_addr();
 
-    /* Fill the whole framebuffer with the background color first. */
+    /* Fill the whole (staging) buffer with the background color first. */
     for (uint32_t i = 0; i < (uint32_t)DISPLAY_WIDTH * DISPLAY_HEIGHT; i++)
         fb[i] = bg;
 
@@ -394,6 +416,16 @@ static int decode_and_draw_bmp(const char *path, uint16_t bg, uint32_t *out_rows
                  rotate, (unsigned long)rows_failed, (unsigned long)(rotate ? dst_w : dst_h));
         hal_uart_puts(dbg);
     }
+
+    /* Only now commit the result onto the live framebuffer -- a clean
+     * (rows_failed == 0) staging buffer is copied over; a bad one is
+     * simply discarded, leaving whatever was already on screen alone
+     * (see this function's opening comment for why). */
+    if (rows_failed == 0U) {
+        memcpy((void *)hal_display_fb_addr(), (const void *)staging_addr(), DISPLAY_FB_SIZE);
+        __asm volatile("dsb" ::: "memory");
+    }
+
     if (out_rows_failed)
         *out_rows_failed = rows_failed;
     return 0;
@@ -526,6 +558,7 @@ void fs_close_custom(struct fs_file *file)
  * ------------------------------------------------------------------- */
 #define UPLOAD_STAGING_PATH "incoming.bmp" /* where an in-progress POST body is written */
 #define GALLERY_META_PATH   "gallery.meta" /* 8 bytes: u32 count, u32 current (both little-endian) */
+#define GALLERY_META_STAGING_PATH "gallery.meta.tmp" /* see gallery_save_meta()'s comment */
 #define MAX_UPLOAD_BYTES    (4U * 1024U * 1024U) /* generous for a photo; bounded so a bad/slow client can't fill the card */
 
 static void gallery_img_path(char *buf, size_t buf_size, uint32_t idx)
@@ -559,6 +592,16 @@ static void gallery_load_meta(uint32_t *count, uint32_t *current)
     *current = (uint32_t)buf[4] | ((uint32_t)buf[5] << 8) | ((uint32_t)buf[6] << 16) | ((uint32_t)buf[7] << 24);
 }
 
+/* Writes to a staging file first, then renames it over the real one --
+ * FA_CREATE_ALWAYS truncates on open, so writing gallery.meta directly
+ * has a window (between that truncate and the write+close completing)
+ * where a reset lands on a 0-byte file: gallery_load_meta() then
+ * reports count=0, orphaning every upload{N}.bmp already on the card
+ * even though they're all still there. Observed in practice: this
+ * exact truncation, on a card that still had two valid images on it.
+ * f_rename() replacing a fully-written temp file has no such window --
+ * a reset before it completes just leaves the previous gallery.meta
+ * (stale at worst, never corrupt) in place. */
 static void gallery_save_meta(uint32_t count, uint32_t current)
 {
     FIL fil;
@@ -570,10 +613,16 @@ static void gallery_save_meta(uint32_t count, uint32_t current)
     buf[4] = (uint8_t)(current); buf[5] = (uint8_t)(current >> 8);
     buf[6] = (uint8_t)(current >> 16); buf[7] = (uint8_t)(current >> 24);
 
-    if (f_open(&fil, GALLERY_META_PATH, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK)
+    if (f_open(&fil, GALLERY_META_STAGING_PATH, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK)
         return;
-    f_write(&fil, buf, sizeof(buf), &bw);
+    if (f_write(&fil, buf, sizeof(buf), &bw) != FR_OK || bw != sizeof(buf)) {
+        f_close(&fil);
+        return; /* don't rename a partial write over the real file */
+    }
     f_close(&fil);
+
+    f_unlink(GALLERY_META_PATH); /* f_rename() doesn't overwrite an existing target */
+    f_rename(GALLERY_META_STAGING_PATH, GALLERY_META_PATH);
 }
 
 /* Persists the background color alongside an image so a power-cycle
