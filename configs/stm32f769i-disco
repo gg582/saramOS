@@ -1,6 +1,14 @@
 # STM32F769I-DISCO board configuration for saramOS
 BOARD := stm32f769i-disco
-BOARD_CPU_HZ := 16000000
+# Must match SYSCLK_HZ in src/hal/stm32f769i-disco/hal_sys.c (216 MHz, raised
+# from the default to match Zephyr's SDRAM timing reference -- see that
+# file's comment). BOARD_CPU_MHZ feeds engine/libttak's DWT cycle-counter
+# timing (see os/default/Makefile's libttak target and
+# engine/libttak/include/ttak/timing/timing.h's TTAK_DWT_MHZ) -- getting
+# this wrong doesn't break the build, it just makes ttak_get_tick_count()
+# silently report the wrong elapsed time.
+BOARD_CPU_HZ := 216000000
+BOARD_CPU_MHZ := 216
 
 # ARM Cortex-M7 toolchain
 BOARD_TOOLCHAIN_PREFIX := arm-none-eabi-

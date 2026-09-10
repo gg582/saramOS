@@ -186,7 +186,7 @@ all: board
 libttak:
 	$(MAKE) -C $(LIBTTAK_DIR) clean
 	$(MAKE) -C $(LIBTTAK_DIR) EMBEDDED_BAREMETAL=1 CC=$(BOARD_CC) AR=$(BOARD_AR) \
-		CFLAGS="-Wall -std=c17 -Iinclude -DEMBEDDED=1 -DEMBEDDED_BAREMETAL=1 -mcpu=cortex-m7 -mthumb -mfloat-abi=hard -mfpu=fpv5-sp-d16 -Os -ffunction-sections -fdata-sections -fno-lto -D_Thread_local=" \
+		CFLAGS="-Wall -std=c17 -Iinclude -DEMBEDDED=1 -DEMBEDDED_BAREMETAL=1 -DTTAK_DWT_MHZ=$(BOARD_CPU_MHZ) -mcpu=cortex-m7 -mthumb -mfloat-abi=hard -mfpu=fpv5-sp-d16 -Os -ffunction-sections -fdata-sections -fno-lto -D_Thread_local=" \
 		LDFLAGS=""
 
 board: $(BOARD_BIN) $(BOARD_HEX) size

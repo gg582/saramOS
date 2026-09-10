@@ -1,0 +1,17 @@
+[submodule "engine/libttak"]
+	path = engine/libttak
+	url = https://github.com/religiya-serdtsa/libttak.git
+	branch = saramos
+
+[submodule "third_party/lwip"]
+	path = third_party/lwip
+	url = https://github.com/gg582/lwip.git
+	branch = saramos
+
+[submodule "third_party/u-boot"]
+	path = third_party/u-boot
+	url = https://github.com/u-boot/u-boot.git
+
+[submodule "tools/vi"]
+	path = tools/vi
+	url = https://github.com/n-t-roff/ex-3.7_4.4BSD.git

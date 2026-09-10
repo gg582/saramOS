@@ -1,6 +1,11 @@
 # STM32F769I-DISC1 board configuration for saramOS
 BOARD := stm32f769i-disc1
+# Must match SYSCLK_HZ in src/hal/stm32f769i-disc1/hal_sys.c -- this board
+# target still runs on the default (no PLL configured yet) HSI clock, 16
+# MHz. See configs/stm32f769i-disco's comment on BOARD_CPU_MHZ for what it
+# feeds.
 BOARD_CPU_HZ := 16000000
+BOARD_CPU_MHZ := 16
 
 # ARM Cortex-M7 toolchain
 BOARD_TOOLCHAIN_PREFIX := arm-none-eabi-
