@@ -10,3 +10,10 @@
 
 # OS-specific files
 .DS_Store
+
+# Python scratch (test/capture scripts under tools/ can produce these)
+__pycache__/
+*.pyc
+
+# Board test logs (captured output, not source)
+tools/*.log
