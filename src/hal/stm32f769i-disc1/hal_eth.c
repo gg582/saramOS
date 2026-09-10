@@ -16,6 +16,13 @@
  * PI10 -> RX_ER     (AF11) - optional
  */
 
+/* Controls the "[ETH] ..." per-packet/per-error UART prints in this
+ * file and in os/default/ethernetif.c (which shares this flag via
+ * extern) -- same "eth on"/"eth off" CLI toggle as the disco target,
+ * off by default. See src/hal/stm32f769i-disco/hal_eth.c's identical
+ * comment. */
+volatile int saramos_eth_verbose = 0;
+
 static eth_dma_desc_t tx_desc[HAL_ETH_TX_DESC_COUNT] __attribute__((aligned(4)));
 static eth_dma_desc_t rx_desc[HAL_ETH_RX_DESC_COUNT] __attribute__((aligned(4)));
 static uint8_t tx_buf[HAL_ETH_TX_DESC_COUNT][HAL_ETH_BUF_SIZE] __attribute__((aligned(32)));
@@ -62,7 +69,7 @@ static void smii_write(uint32_t phy, uint32_t reg, uint16_t val)
     ETH->MIIDR = val;
     ETH->MIIAR = (phy << ETH_MACMIIAR_PA_Pos) |
                  (reg << ETH_MACMIIAR_MR_Pos) |
-                 ETH_MACMIIAR_CR_DIV16 |
+                 ETH_MACMIIAR_CR_DIV102 |
                  ETH_MACMIIAR_MW |
                  ETH_MACMIIAR_MB;
     while (ETH->MIIAR & ETH_MACMIIAR_MB)
@@ -75,7 +82,7 @@ static uint16_t smii_read(uint32_t phy, uint32_t reg)
         ;
     ETH->MIIAR = (phy << ETH_MACMIIAR_PA_Pos) |
                  (reg << ETH_MACMIIAR_MR_Pos) |
-                 ETH_MACMIIAR_CR_DIV16 |
+                 ETH_MACMIIAR_CR_DIV102 |
                  ETH_MACMIIAR_MB;
     while (ETH->MIIAR & ETH_MACMIIAR_MB)
         ;
@@ -90,22 +97,22 @@ static void configure_rmii_pins(void)
                    RCC_AHB1ENR_GPIOCEN |
                    RCC_AHB1ENR_GPIOGEN;
 
-    /* PA1 REF_CLK, PA2 MDIO, PA7 CRS_DV */
-    hal_gpio_init_af(GPIOA_BASE, 1, 11, GPIO_SPEED_HIGH, GPIO_PUPD_NONE);
-    hal_gpio_init_af(GPIOA_BASE, 2, 11, GPIO_SPEED_HIGH, GPIO_PUPD_NONE);
-    hal_gpio_init_af(GPIOA_BASE, 7, 11, GPIO_SPEED_HIGH, GPIO_PUPD_NONE);
+    /* PA1 REF_CLK, PA7 CRS_DV */
+    hal_gpio_init_af(GPIOA_BASE, 1, 11, GPIO_SPEED_VERY_HIGH, GPIO_PUPD_NONE);
+    hal_gpio_init_af(GPIOA_BASE, 7, 11, GPIO_SPEED_VERY_HIGH, GPIO_PUPD_NONE);
 
-    /* PB13 TXD1 */
-    hal_gpio_init_af(GPIOB_BASE, 13, 11, GPIO_SPEED_HIGH, GPIO_PUPD_NONE);
+    /* PA2 MDIO (Open-Drain, requires pull-up) */
+    hal_gpio_init_af(GPIOA_BASE, 2, 11, GPIO_SPEED_VERY_HIGH, GPIO_PUPD_UP);
 
     /* PC1 MDC, PC4 RXD0, PC5 RXD1 */
-    hal_gpio_init_af(GPIOC_BASE, 1, 11, GPIO_SPEED_HIGH, GPIO_PUPD_NONE);
-    hal_gpio_init_af(GPIOC_BASE, 4, 11, GPIO_SPEED_HIGH, GPIO_PUPD_NONE);
-    hal_gpio_init_af(GPIOC_BASE, 5, 11, GPIO_SPEED_HIGH, GPIO_PUPD_NONE);
+    hal_gpio_init_af(GPIOC_BASE, 1, 11, GPIO_SPEED_VERY_HIGH, GPIO_PUPD_NONE);
+    hal_gpio_init_af(GPIOC_BASE, 4, 11, GPIO_SPEED_VERY_HIGH, GPIO_PUPD_NONE);
+    hal_gpio_init_af(GPIOC_BASE, 5, 11, GPIO_SPEED_VERY_HIGH, GPIO_PUPD_NONE);
 
-    /* PG13 TXD0, PG14 TX_EN */
-    hal_gpio_init_af(GPIOG_BASE, 13, 11, GPIO_SPEED_HIGH, GPIO_PUPD_NONE);
-    hal_gpio_init_af(GPIOG_BASE, 14, 11, GPIO_SPEED_HIGH, GPIO_PUPD_NONE);
+    /* PG11 TX_EN, PG13 TXD0, PG14 TXD1 */
+    hal_gpio_init_af(GPIOG_BASE, 11, 11, GPIO_SPEED_VERY_HIGH, GPIO_PUPD_NONE);
+    hal_gpio_init_af(GPIOG_BASE, 13, 11, GPIO_SPEED_VERY_HIGH, GPIO_PUPD_NONE);
+    hal_gpio_init_af(GPIOG_BASE, 14, 11, GPIO_SPEED_VERY_HIGH, GPIO_PUPD_NONE);
 }
 
 static void set_mac_address(const uint8_t *mac)
@@ -147,9 +154,11 @@ static void init_descriptor_rings(void)
 
 static int phy_init(void)
 {
+    extern volatile uint32_t saramos_tick_ms;
     uint16_t bcr;
     uint16_t bsr;
     uint32_t timeout;
+    uint32_t deadline;
 
     /* Reset PHY */
     smii_write(LAN8742A_PHY_ADDR, PHY_BCR, PHY_BCR_RESET);
@@ -166,27 +175,43 @@ static int phy_init(void)
     smii_write(LAN8742A_PHY_ADDR, PHY_BCR, bcr);
     smii_write(LAN8742A_PHY_ADDR, PHY_BCR, bcr | PHY_BCR_ANEG_RST);
 
-    /* Wait for link up and auto-negotiation complete */
-    timeout = 1000000;
-    while (timeout--) {
+    /* Wait for link up and auto-negotiation complete, on a real
+     * saramos_tick_ms-based deadline rather than a raw busy-loop
+     * iteration count -- see src/hal/stm32f769i-disco/hal_eth.c's
+     * identical comment for why: a busy-loop's real wall-clock
+     * duration isn't fixed, so it can run out well before ANEG
+     * actually finishes, and proceeding anyway means enabling the MAC
+     * against stale/default speed-duplex values. */
+    deadline = saramos_tick_ms + 3000U;
+    do {
         bsr = smii_read(LAN8742A_PHY_ADDR, PHY_BSR);
         if ((bsr & (PHY_BSR_LINK_UP | PHY_BSR_ANEG_CMPLT)) ==
             (PHY_BSR_LINK_UP | PHY_BSR_ANEG_CMPLT)) {
             break;
         }
-    }
-    if (timeout == 0)
-        return -2;
+    } while ((int32_t)(saramos_tick_ms - deadline) < 0);
 
-    eth_link_up = 1;
+    bsr = smii_read(LAN8742A_PHY_ADDR, PHY_BSR);
+    eth_link_up = (bsr & PHY_BSR_LINK_UP) ? 1 : 0;
+
+    if (!(bsr & PHY_BSR_ANEG_CMPLT))
+        return -3; /* negotiation never finished within the deadline */
+
     return 0;
 }
 
 static void read_phy_speed_duplex(void)
 {
     uint16_t scsr = smii_read(LAN8742A_PHY_ADDR, PHY_SCSR);
-    int speed100 = ((scsr >> PHY_SCSR_SPEED_Pos) & 3U) >= 2U;
-    int full_duplex = (scsr & PHY_SCSR_DUPLEX) ? 1 : 0;
+    /* bits [4:2] of SCSR indicate the HCD speed:
+     * 001: 10Base-T half-duplex
+     * 101: 10Base-T full-duplex
+     * 010: 100Base-TX half-duplex
+     * 110: 100Base-TX full-duplex
+     */
+    uint32_t hcd = (scsr >> 2) & 7U;
+    int speed100 = (hcd == 2 || hcd == 6);
+    int full_duplex = (hcd == 5 || hcd == 6);
 
     uint32_t maccr = ETH->CR;
     maccr &= ~(ETH_MACCR_FES | ETH_MACCR_DM);
@@ -205,23 +230,44 @@ int hal_eth_init(const uint8_t *mac_addr)
         for (int i = 0; i < 6; i++)
             eth_mac_addr[i] = mac_addr[i];
     } else {
-        /* default MAC 02:00:00:00:00:01 */
-        eth_mac_addr[0] = 0x02;
-        eth_mac_addr[1] = 0x00;
-        eth_mac_addr[2] = 0x00;
-        eth_mac_addr[3] = 0x00;
-        eth_mac_addr[4] = 0x00;
-        eth_mac_addr[5] = 0x01;
+        /* Derive a unique MAC from the STM32F7 UID (0x1FF0F420), same
+         * scheme as the disco target -- see that hal_eth.c's identical
+         * block -- rather than a fixed default that would collide if
+         * two boards were ever on the same LAN. */
+        uint32_t uid0 = *(volatile uint32_t *)0x1FF0F420U;
+        uint32_t uid2 = *(volatile uint32_t *)0x1FF0F428U;
+        eth_mac_addr[0] = 0x02; /* Locally Administered */
+        eth_mac_addr[1] = 0x80;
+        eth_mac_addr[2] = 0xE1;
+        eth_mac_addr[3] = (uint8_t)(uid0 ^ (uid0 >> 16));
+        eth_mac_addr[4] = (uint8_t)(uid2 >> 8);
+        eth_mac_addr[5] = (uint8_t)(uid2);
     }
 
-    /* Enable SYSCFG and Ethernet clocks */
+    /* Enable SYSCFG clock */
     RCC_APB2ENR |= RCC_APB2ENR_SYSCFGEN;
+
+    /* Enable I/O Compensation Cell */
+    #define SYSCFG_CMPCR  (*(volatile uint32_t *)0x40013820U)
+    #define SYSCFG_CMPCR_CMP_PD  (1U << 0)
+    #define SYSCFG_CMPCR_READY   (1U << 8)
+    SYSCFG_CMPCR |= SYSCFG_CMPCR_CMP_PD;
+    while (!(SYSCFG_CMPCR & SYSCFG_CMPCR_READY))
+        ;
+
+    /* Select RMII mode (must be configured before enabling Ethernet clocks) */
+    SYSCFG_PMC |= SYSCFG_PMC_MII_RMII_SEL;
+
+    /* Enable Ethernet clocks */
     RCC_AHB1ENR |= RCC_AHB1ENR_ETHMACEN |
                    RCC_AHB1ENR_ETHMACTXEN |
                    RCC_AHB1ENR_ETHMACRXEN;
 
-    /* Select RMII mode */
-    SYSCFG_PMC |= SYSCFG_PMC_MII_RMII_SEL;
+    /* Reset Ethernet peripheral via RCC */
+    RCC_AHB1RSTR |= RCC_AHB1RSTR_ETHMACRST;
+    eth_delay(100);
+    RCC_AHB1RSTR &= ~RCC_AHB1RSTR_ETHMACRST;
+    eth_delay(100);
 
     /* Configure RMII pins */
     configure_rmii_pins();
@@ -238,10 +284,19 @@ int hal_eth_init(const uint8_t *mac_addr)
     /* Reset Ethernet MAC */
     ETH->CR = 0;
 
-    /* MAC configuration: checksum offload, automatic pad/CRC stripping,
-     * inter-frame gap 96 bits. Speed/duplex applied after PHY negotiation. */
+    /* MAC configuration: automatic pad/CRC stripping, inter-frame gap
+     * 96 bits. Speed/duplex applied after PHY negotiation.
+     *
+     * Deliberately NOT setting ETH_MACCR_IPCO (IPv4 checksum
+     * offload) -- see src/hal/stm32f769i-disco/hal_eth.c's identical
+     * comment: lwipopts.h has CHECKSUM_BY_HARDWARE=0, so IPCO's
+     * hardware check is pure redundancy on top of lwIP's own software
+     * verification, and it's redundancy that costs something --
+     * IPCO flagging a frame's checksum sets ETH_RDES0_ES, and this
+     * driver drops the whole frame on ES without distinguishing a
+     * genuine CRC/framing error from IPCO simply not liking a frame's
+     * shape (IP options, certain multicast/IGMP framing, ...). */
     ETH->CR = ETH_MACCR_APCS |     /* automatic pad/CRC strip */
-              ETH_MACCR_IPCO |     /* IPv4 checksum offload */
               ETH_MACCR_IFG_96;
 
     /* Frame filter: pass all multicast + broadcast implicitly + perfect */
@@ -269,18 +324,33 @@ int hal_eth_init(const uint8_t *mac_addr)
     /* DMA interrupts (optional) */
     ETH->DMAIER = ETH_DMAIER_NISE | ETH_DMAIER_RIE;
 
-    /* Enable MAC receiver/transmitter after PHY is ready */
-    ETH->CR |= ETH_MACCR_RE | ETH_MACCR_TE;
-
-    /* Initialize PHY and read negotiated speed/duplex */
+    /* Initialize PHY and read negotiated speed/duplex *before* the MAC
+     * receiver/transmitter are enabled -- see
+     * src/hal/stm32f769i-disco/hal_eth.c's identical comment: enabling
+     * RE/TE ahead of phy_init() leaves the MAC actively trying to
+     * receive while the PHY is still mid soft-reset/autonegotiation,
+     * which can set a descriptor's error flags on whatever arrives
+     * during that unstable window. */
     if (phy_init() != 0)
         return -2;
     read_phy_speed_duplex();
+
+    /* Only now start the MAC actually receiving/transmitting, with the
+     * PHY link already confirmed up and autonegotiation complete. */
+    ETH->CR |= ETH_MACCR_RE | ETH_MACCR_TE;
 
     /* Resume DMA receive */
     ETH->DMARPDR = 0;
 
     return 0;
+}
+
+void hal_eth_get_mac_addr(uint8_t *mac)
+{
+    if (!mac)
+        return;
+    for (int i = 0; i < 6; i++)
+        mac[i] = eth_mac_addr[i];
 }
 
 int hal_eth_link_up(void)
@@ -297,10 +367,15 @@ void hal_eth_poll(void)
     static uint32_t poll_count = 0;
     if (++poll_count > 100000) {
         poll_count = 0;
-        int was_up = eth_link_up;
         int up = hal_eth_link_up();
-        if (up && !was_up)
-            read_phy_speed_duplex();
+        eth_link_up = up;
+
+        if (up) {
+            uint16_t bsr = smii_read(LAN8742A_PHY_ADDR, PHY_BSR);
+            if (bsr & PHY_BSR_ANEG_CMPLT) {
+                read_phy_speed_duplex();
+            }
+        }
     }
 }
 
@@ -347,9 +422,16 @@ int hal_eth_rx(uint8_t *buf, size_t max_len, size_t *out_len)
 
     uint32_t status = desc->status;
     if (status & ETH_RDES0_ES) {
-        /* Error: re-own descriptor */
+        /* Error: re-own descriptor. Also poke DMARPDR (Receive Poll
+         * Demand) here, same as the success path below -- see
+         * src/hal/stm32f769i-disco/hal_eth.c's identical comment:
+         * without it, if the DMA's receive process happened to go
+         * Suspended around this error, it never resumes on its own,
+         * and every later hal_eth_rx() call just re-reads whatever
+         * stale content is already sitting in the ring. */
         desc->status = ETH_RDES0_OWN;
         rx_idx = (rx_idx + 1) % HAL_ETH_RX_DESC_COUNT;
+        ETH->DMARPDR = 0;
         return -1;
     }
 
@@ -357,6 +439,7 @@ int hal_eth_rx(uint8_t *buf, size_t max_len, size_t *out_len)
         /* Fragmented/chained packet not supported in this minimal driver */
         desc->status = ETH_RDES0_OWN;
         rx_idx = (rx_idx + 1) % HAL_ETH_RX_DESC_COUNT;
+        ETH->DMARPDR = 0; /* see the ES-error branch's comment above */
         return -2;
     }
 

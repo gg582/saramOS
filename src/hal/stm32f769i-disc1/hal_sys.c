@@ -1,4 +1,13 @@
 #include <hal/board.h>
+#include <os/saramos_kernel.h>
+#include <os/saramos_sem.h>
+
+/* Posted once a second from SysTick_Handler -- see main.c's
+ * heartbeat_task_entry() and src/hal/stm32f769i-disco/hal_sys.c's
+ * identical definition/comment for the full explanation (the actual
+ * end-to-end demonstration that TCB/PendSV preemption and
+ * saramos_sem_t work together). */
+saramos_sem_t saramos_heartbeat_sem;
 
 #define SCB_BASE        0xE000ED00U
 #define SCB_CCR         (*(volatile uint32_t *)(SCB_BASE + 0x14U))
@@ -97,9 +106,25 @@ void hal_systick_init(void)
     SYSTICK_CVR = 0;
     SYSTICK_RVR = SYSTICK_RELOAD;
     SYSTICK_CSR = SYSTICK_ENABLE | SYSTICK_TICKINT | SYSTICK_CLKSOURCE;
+    __asm volatile ("cpsie i" ::: "memory");
 }
 
 void SysTick_Handler(void)
 {
     saramos_tick_ms++;
+
+    /* Drive the real preemptive kernel and the once-a-second heartbeat
+     * wake-up -- see src/hal/stm32f769i-disco/hal_sys.c's identical
+     * block for the full explanation. This was previously entirely
+     * missing here: disc1's SysTick_Handler only advanced the tick
+     * counter, so saramos_schedule() never ran and nothing preempted
+     * on this target -- every task would have run purely cooperatively
+     * regardless of TCB priority, the opposite of what the kernel is
+     * for. */
+    if (saramos_current_tcb) {
+        saramos_schedule();
+
+        if ((saramos_tick_ms % 1000U) == 0U)
+            saramos_sem_post(&saramos_heartbeat_sem);
+    }
 }

@@ -15,6 +15,7 @@ extern "C" {
 #define RCC_CFGR        (*(volatile uint32_t *)(RCC_BASE + 0x08U))
 #define RCC_AHB1ENR     (*(volatile uint32_t *)(RCC_BASE + 0x30U))
 #define RCC_AHB2ENR     (*(volatile uint32_t *)(RCC_BASE + 0x34U))
+#define RCC_AHB1RSTR    (*(volatile uint32_t *)(RCC_BASE + 0x10U))
 #define RCC_AHB2RSTR    (*(volatile uint32_t *)(RCC_BASE + 0x14U))
 #define RCC_APB2ENR     (*(volatile uint32_t *)(RCC_BASE + 0x44U))
 #define RCC_APB2RSTR    (*(volatile uint32_t *)(RCC_BASE + 0x24U))
@@ -35,6 +36,8 @@ extern "C" {
 #define RCC_AHB1ENR_ETHMACEN    (1U << 25)
 #define RCC_AHB1ENR_ETHMACTXEN  (1U << 26)
 #define RCC_AHB1ENR_ETHMACRXEN  (1U << 27)
+
+#define RCC_AHB1RSTR_ETHMACRST  (1U << 25)
 
 #define RCC_APB2ENR_USART1EN    (1U << 4)
 #define RCC_APB2ENR_SDMMC1EN    (1U << 11)

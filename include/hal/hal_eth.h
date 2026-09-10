@@ -34,7 +34,7 @@ typedef struct {
     volatile uint32_t RESERVED1[10];
     volatile uint32_t A0HR;
     volatile uint32_t A0LR;
-    volatile uint32_t RESERVED2[1010]; /* pad to 0x1000 */
+    volatile uint32_t RESERVED2[1006]; /* pad to 0x1000 */
     volatile uint32_t DMABMR;
     volatile uint32_t DMATPDR;
     volatile uint32_t DMARPDR;
@@ -62,7 +62,7 @@ typedef struct {
 /* MAC MII address register */
 #define ETH_MACMIIAR_MB     (1U << 0)
 #define ETH_MACMIIAR_MW     (1U << 1)
-#define ETH_MACMIIAR_CR_DIV16 (2U << 2)
+#define ETH_MACMIIAR_CR_DIV102 (4U << 2)
 #define ETH_MACMIIAR_MR_Pos 6U
 #define ETH_MACMIIAR_PA_Pos 11U
 
@@ -105,6 +105,7 @@ typedef struct {
 
 /* Ethernet HAL API */
 int  hal_eth_init(const uint8_t *mac_addr);
+void hal_eth_get_mac_addr(uint8_t *mac);
 int  hal_eth_link_up(void);
 void hal_eth_poll(void);
 int  hal_eth_tx(const uint8_t *buf, size_t len);
